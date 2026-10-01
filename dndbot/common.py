@@ -1,0 +1,229 @@
+"""Small helpers shared by every handler module."""
+
+from __future__ import annotations
+
+import html
+import time
+from typing import Any, Sequence
+
+from telethon import events
+
+from . import config
+from .storage import db
+
+# Telegram rejects a message above 4096 characters.
+MESSAGE_LIMIT = 4096
+
+
+def safe(text: Any) -> str:
+    """Escape user-supplied text for Telegram HTML.
+
+    Campaign names, character names, notes and announcements all come from
+    players and are interpolated into HTML messages, so they must be escaped
+    or Telegram rejects the whole message.
+    """
+    return html.escape(str(text if text is not None else ""), quote=False)
+
+
+def display_name(user: Any) -> str:
+    """A stable, human-readable name for a user or a stored roster row."""
+    if user is None:
+        return "Someone"
+    if isinstance(user, str):
+        return user
+    first = (getattr(user, "first_name", "") or "").strip()
+    last = (getattr(user, "last_name", "") or "").strip()
+    name = " ".join(safe(part) for part in (first, last) if part)
+    if not name and isinstance(user, dict):
+        name = " ".join(
+            safe(part) for part in ((user.get("first_name") or ""), (user.get("last_name") or ""))
+            if part
+        ).strip()
+    if not name:
+        username = getattr(user, "username", None)
+        if not username and isinstance(user, dict):
+            username = user.get("username")
+        if username:
+            return f"<code>@{safe(username)}</code>"
+        return "Someone"
+    username = getattr(user, "username", None)
+    if not username and isinstance(user, dict):
+        username = user.get("username")
+    return f"{name} <code>@{safe(username)}</code>" if username else name
+
+
+def plain_name(user: Any) -> str:
+    return _strip_tags(display_name(user))
+
+
+def _strip_tags(text: str) -> str:
+    out, depth = [], 0
+    i = 0
+    while i < len(text):
+        if text[i] == "<":
+            depth += 1
+        elif text[i] == ">":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(text[i])
+        i += 1
+    return "".join(out).strip()
+
+
+def relative(timestamp: float | None) -> str:
+    """"3 minutes ago" style stamp."""
+    if not timestamp:
+        return "never"
+    delta = max(0.0, time.time() - float(timestamp))
+    for limit, divisor, unit in (
+        (60, 1, "second"),
+        (3600, 60, "minute"),
+        (86400, 3600, "hour"),
+        (2592000, 86400, "day"),
+    ):
+        if delta < limit:
+            value = int(delta / divisor)
+            return f"{value} {unit}{'s' if value != 1 else ''} ago"
+    return f"{int(delta / 2592000)} months ago"
+
+
+def duration(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def is_private(event: events.NewMessage | events.CallbackQuery.Event) -> bool:
+    return bool(getattr(event, "is_private", False))
+
+
+def is_callback(event) -> bool:
+    """True for a CallbackQuery event (a button press).
+
+    Only ``NewMessage.Event`` carries ``.out``; a CallbackQuery event has no
+    such attribute, so probing ``event.out`` there raises AttributeError.
+    """
+    return isinstance(event, events.CallbackQuery.Event) or hasattr(event, "data")
+
+
+async def send_view(
+    event,
+    text: str,
+    buttons: Sequence[Any] | None = None,
+    replace: bool | None = None,
+) -> Any:
+    """Send a view, editing the triggering message when that makes sense.
+
+    ``replace`` decides explicitly. When it is ``None`` the sensible default
+    applies: a button press edits the message it came from, a typed command
+    sends a new reply.
+    """
+    if replace is None:
+        replace = is_callback(event)
+    if replace:
+        return await event.edit(
+            text, buttons=buttons, parse_mode="html", link_preview=False
+        )
+    return await event.reply(
+        text, buttons=buttons, parse_mode="html", link_preview=False
+    )
+
+
+async def record_user(event) -> None:
+    """Keep the users table fresh for rosters and announcements."""
+    sender = await event.get_sender()
+    if sender is None:
+        return
+    await db.upsert_user(
+        sender.id,
+        username=getattr(sender, "username", None),
+        first_name=getattr(sender, "first_name", None),
+        last_name=getattr(sender, "last_name", None),
+    )
+
+
+class NoCampaign(Exception):
+    """Raised when a command needs a campaign but none is selected."""
+
+
+class NotAMember(Exception):
+    """Raised when the user is not in the campaign they are addressing."""
+
+
+class NotTheDM(Exception):
+    """Raised when a player-only command is used by a non-DM."""
+
+
+async def resolve_campaign(event, argument: str | None = None) -> Any:
+    """Work out which campaign a command refers to.
+
+    Order: explicit argument -> the campaign being used in this chat -> the
+    user's last selected campaign -> their only campaign.
+    """
+    user_id = event.sender_id
+
+    if argument:
+        term = argument.strip()
+        row = await db.get_campaign_by_code(term)
+        if row is None:
+            matches = await db.find_campaigns(term)
+            row = matches[0] if matches else None
+        if row is None:
+            raise NoCampaign(f"I do not know a campaign called <code>{term}</code>.")
+        await db.set_active_campaign(user_id, row["id"])
+        return row
+
+    # In a named group, prefer a campaign whose name appears in the title.
+    chat = getattr(event, "chat", None)
+    title = getattr(chat, "title", None) if chat is not None else None
+    if title:
+        lowered = title.lower()
+        for row in await db.campaigns_for_user(user_id):
+            if row["name"].lower() in lowered:
+                return row
+
+    selected = await db.active_campaign_id(user_id)
+    if selected:
+        row = await db.get_campaign(selected)
+        if row is not None:
+            return row
+
+    mine = await db.campaigns_for_user(user_id)
+    if len(mine) == 1:
+        return mine[0]
+    if not mine:
+        raise NoCampaign(
+            "You are not in a campaign yet.\n\n"
+            "Start one with <code>/newcampaign The Amber Court</code> "
+            "or join a friend's with <code>/join ABC123</code>."
+        )
+    names = "\n".join(f"• <code>{row['name']}</code> <i>({row['invite_code']})</i>" for row in mine)
+    raise NoCampaign(
+        "Which campaign? Send it explicitly, e.g. <code>/campaign Amber Court</code>.\n\n"
+        f"{names}\n\nOr switch with <code>/select</code>."
+    )
+
+
+async def ensure_member(campaign, user_id: int) -> Any:
+    membership = await db.membership(campaign["id"], user_id)
+    if membership is None:
+        raise NotAMember(
+            f"You are not a member of <b>{campaign['name']}</b>.\n"
+            f"Join with <code>/join {campaign['invite_code']}</code> and wait for the DM to approve."
+        )
+    return membership
+
+
+async def ensure_dm(campaign, user_id: int) -> None:
+    membership = await db.membership(campaign["id"], user_id)
+    if membership is None or membership["role"] != "dm":
+        raise NotTheDM("Only the DM can do that.")
+
+
+def is_admin(user_id: int | None) -> bool:
+    return bool(config.ADMIN_ID and user_id == config.ADMIN_ID)

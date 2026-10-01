@@ -1,0 +1,11 @@
+.venv/
+.env
+*.session
+*.session-journal
+*.db
+.cache/
+__pycache__/
+*.py[cod]
+
+# Logs
+logs/

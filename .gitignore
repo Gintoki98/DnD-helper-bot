@@ -9,3 +9,6 @@ __pycache__/
 
 # Logs
 logs/
+.cache/
+.venv/
+*.pyc

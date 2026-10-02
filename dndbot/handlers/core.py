@@ -5,7 +5,7 @@ from __future__ import annotations
 from telethon import Button, events
 
 from .. import keyboards as kb
-from ..common import display_name, is_admin, safe
+from ..common import command_argument, display_name, is_admin, safe
 from ..formatting import esc as escape
 from ..storage import db
 
@@ -97,8 +97,7 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/help(?:@[\w_]+)?(?:\s+(\w+))?$"))
     async def help_command(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        topic = parts[1].strip().lower() if len(parts) > 1 else ""
+        topic = command_argument(event).lower()
         pages = {
             "dice": HELP_DICE,
             "campaign": HELP_CAMPAIGN,

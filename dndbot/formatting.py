@@ -321,7 +321,7 @@ def format_item(entry, data: dict) -> list[str]:
 
 
 # -- rules ----------------------------------------------------------------
-def format_rule(entry, data: dict, depth: int = 0) -> list[str]:
+def format_rule(entry, data: dict) -> list[str]:
     lines = [f"<b>\u2696 {esc(data.get('name', entry.name))}</b>", ""]
     lines.append(esc(desc_text(data.get("desc"))))
     children = data.get("children") or []

@@ -5,7 +5,7 @@ from __future__ import annotations
 from telethon import events
 
 from .. import keyboards as kb
-from ..common import display_name, safe
+from ..common import command_argument, display_name, safe
 from ..dice import DiceError, RollResult, roll
 
 # user_id -> the expression currently being typed on the dice pad
@@ -55,8 +55,7 @@ async def signed_roll(event, expression: str) -> None:
 def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/roll(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def roll_command(event: events.NewMessage.Event) -> None:
-        expression = (event.raw_text.split(None, 1)[1] if len(event.raw_text.split(None, 1)) > 1 else "")
-        expression = (expression or "").strip()
+        expression = command_argument(event)
         if not expression:
             await event.reply(
                 "What should I roll?\n\n"
@@ -72,12 +71,12 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/(?:advantage|adv)(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def advantage_command(event: events.NewMessage.Event) -> None:
-        extra = (event.raw_text.split(None, 1)[1] if len(event.raw_text.split(None, 1)) > 1 else "").strip()
+        extra = command_argument(event)
         await signed_roll(event, f"adv:{extra or 'd20'}")
 
     @client.on(events.NewMessage(pattern=r"^/(?:disadvantage|dis)(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def disadvantage_command(event: events.NewMessage.Event) -> None:
-        extra = (event.raw_text.split(None, 1)[1] if len(event.raw_text.split(None, 1)) > 1 else "").strip()
+        extra = command_argument(event)
         await signed_roll(event, f"dis:{extra or 'd20'}")
 
     @client.on(events.NewMessage(pattern=r"^/init(?:@[\w_]+)?(?:\s+(.*))?$"))
@@ -87,9 +86,9 @@ def register(client) -> None:
         from ..storage import db
 
         bonus = 0
-        parts = event.raw_text.split(None, 1)
-        if len(parts) > 1:
-            bonus = int(parts[1].strip() or 0)
+        argument = command_argument(event)
+        if argument:
+            bonus = int(argument)
         try:
             campaign = await resolve_campaign(event)
             party = await db.party(campaign["id"])

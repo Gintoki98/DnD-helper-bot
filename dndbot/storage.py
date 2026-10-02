@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import aiosqlite
 
@@ -130,16 +130,6 @@ CREATE TABLE IF NOT EXISTS character_events (
 CREATE INDEX IF NOT EXISTS idx_events_character ON character_events(character_id, id);
 """
 
-# Field name on the characters table -> the six ability keys
-ABILITY_FIELDS = {
-    "str": "str",
-    "dex": "dex",
-    "con": "con",
-    "int": "intl",
-    "wis": "wis",
-    "cha": "cha",
-}
-
 
 def ability_modifier(score: int) -> int:
     """5e ability modifier: floor((score - 10) / 2)."""
@@ -199,11 +189,6 @@ class Database:
             cur = await self.db.execute(sql, params)
             await self.db.commit()
             return int(cur.lastrowid)
-
-    async def _execute_many(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
-        async with self._lock:
-            await self.db.executemany(sql, rows)
-            await self.db.commit()
 
     # -- users ----------------------------------------------------------
     async def upsert_user(
@@ -326,11 +311,6 @@ class Database:
             "UPDATE campaigns SET touched_at = ? WHERE id = ?", (time.time(), campaign_id)
         )
 
-    async def set_campaign_description(self, campaign_id: int, description: str) -> None:
-        await self._write(
-            "UPDATE campaigns SET description = ? WHERE id = ?", (description, campaign_id)
-        )
-
     # -- membership -----------------------------------------------------
     async def membership(self, campaign_id: int, user_id: int) -> Any:
         return await self._fetchone(
@@ -370,12 +350,6 @@ class Database:
             """,
             (campaign_id,),
         )
-
-    async def dm_id(self, campaign_id: int) -> int | None:
-        row = await self._fetchone(
-            "SELECT dm_id FROM campaigns WHERE id = ?", (campaign_id,)
-        )
-        return int(row["dm_id"]) if row else None
 
     # -- join requests --------------------------------------------------
     async def create_join_request(

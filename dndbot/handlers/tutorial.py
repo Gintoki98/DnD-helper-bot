@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from telethon import Button, events
 
-from ..common import safe, send_view
+from ..common import command_argument, safe, send_view
 
 TUTORIAL_PAGES: list[tuple[str, str]] = [
     (
@@ -195,8 +195,7 @@ async def send(event, page: int = 0, replace: bool | None = None) -> None:
 def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/tutorial(?:@[\w_]+)?(?:\s+(\w+))?$"))
     async def tutorial(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        topic = parts[1].strip().lower() if len(parts) > 1 else ""
+        topic = command_argument(event).lower()
         if not topic:
             await send(event, 0)
             return

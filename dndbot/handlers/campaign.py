@@ -12,6 +12,7 @@ from ..common import (
     NoCampaign,
     NotAMember,
     NotTheDM,
+    command_argument,
     display_name,
     duration,
     ensure_dm,
@@ -77,8 +78,8 @@ def register(client) -> None:
     # ------------------------------------------------------------------
     @client.on(events.NewMessage(pattern=r"^/newcampaign(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def new_campaign(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        if len(parts) < 2 or not parts[1].strip():
+        raw = command_argument(event)
+        if not raw:
             await event.reply(
                 "Give the campaign a name:\n<code>/newcampaign The Amber Court</code>\n"
                 "Or with a blurb:\n<code>/newcampaign The Amber Court | A haunted road north</code>",
@@ -86,7 +87,6 @@ def register(client) -> None:
             )
             return
 
-        raw = parts[1].strip()
         name, _, description = raw.partition("|")
         name, description = name.strip(), description.strip()
         if not name:
@@ -122,8 +122,7 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/join(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def join_campaign(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else ""
+        term = command_argument(event)
         if not term:
             mine = await db.campaigns_for_user(event.sender_id)
             if not mine:
@@ -197,15 +196,11 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/(?:campaign|camp)(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def campaign_panel(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else None
+        term = command_argument(event)
         try:
             campaign = await resolve_campaign(event, term)
             await ensure_member(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except NotAMember as exc:
+        except (NoCampaign, NotAMember) as exc:
             await event.reply(str(exc), parse_mode="html")
             return
 
@@ -249,8 +244,7 @@ def register(client) -> None:
         if not rows:
             await event.reply("You are not in a campaign yet.", parse_mode="html")
             return
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else ""
+        term = command_argument(event)
         if term:
             match = await db.get_campaign_by_code(term)
             if match is None:
@@ -279,15 +273,11 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/roster(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def roster_command(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else None
+        term = command_argument(event)
         try:
             campaign = await resolve_campaign(event, term)
             await ensure_member(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except NotAMember as exc:
+        except (NoCampaign, NotAMember) as exc:
             await event.reply(str(exc), parse_mode="html")
             return
 
@@ -317,8 +307,7 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/leave(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def leave_campaign(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else None
+        term = command_argument(event)
         try:
             campaign = await resolve_campaign(event, term)
         except NoCampaign as exc:
@@ -367,8 +356,7 @@ def register(client) -> None:
             )
             return
 
-        parts = event.raw_text.split(None, 1)
-        title = parts[1].strip() if len(parts) > 1 else ""
+        title = command_argument(event)
         await db.start_session(campaign["id"], event.sender_id, title)
         await db.touch_campaign(campaign["id"])
 
@@ -421,8 +409,7 @@ def register(client) -> None:
             await event.reply("No session is running.", parse_mode="html")
             return
 
-        parts = event.raw_text.split(None, 1)
-        notes = parts[1].strip() if len(parts) > 1 else ""
+        notes = command_argument(event)
         length = duration(time.time() - active["started_at"])
         await db.end_session(active["id"], notes)
         await broadcast(
@@ -528,8 +515,7 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/announce(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def announce(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        text = parts[1].strip() if len(parts) > 1 else ""
+        text = command_argument(event)
         try:
             campaign = await resolve_campaign(event)
             await ensure_dm(campaign, event.sender_id)

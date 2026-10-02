@@ -8,7 +8,7 @@ from typing import Any
 from telethon import events
 
 from .. import keyboards as kb
-from ..common import MESSAGE_LIMIT, send_view
+from ..common import MESSAGE_LIMIT, command_argument, send_view
 from ..formatting import format_entry, format_search_hit
 from ..keyboards import entry_from_token
 from ..srd import CATEGORIES, SRDError, srd
@@ -138,16 +138,14 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/search(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def search_command(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else ""
+        term = command_argument(event)
         await send_search(event, term)
 
     @client.on(
         events.NewMessage(pattern=r"^/randmonster(?:@[\w_]+)?(?:\s+([\d/]+))?$")
     )
     async def random_monster(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        cr = parts[1].strip() if len(parts) > 1 else ""
+        cr = command_argument(event)
         if cr:
             if "/" in cr:
                 low, _, high = cr.partition("/")
@@ -241,8 +239,7 @@ def _make_lookup(command: str, category: str):
 
 
 async def _lookup(event, category: str) -> None:
-    parts = event.raw_text.split(None, 1)
-    term = parts[1].strip() if len(parts) > 1 else ""
+    term = command_argument(event)
     if not term:
         entries = await _safe_index(category)
         cat = CATEGORIES[category]

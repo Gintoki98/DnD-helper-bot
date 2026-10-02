@@ -98,10 +98,6 @@ def duration(seconds: float) -> str:
     return f"{secs}s"
 
 
-def is_private(event: events.NewMessage | events.CallbackQuery.Event) -> bool:
-    return bool(getattr(event, "is_private", False))
-
-
 def is_callback(event) -> bool:
     """True for a CallbackQuery event (a button press).
 
@@ -109,6 +105,15 @@ def is_callback(event) -> bool:
     such attribute, so probing ``event.out`` there raises AttributeError.
     """
     return isinstance(event, events.CallbackQuery.Event) or hasattr(event, "data")
+
+
+def command_argument(event) -> str:
+    """The text after the command word, stripped; ``""`` when there is none.
+
+    ``/switch Sylra`` -> ``"Sylra"``, ``/switch`` -> ``""``.
+    """
+    parts = event.raw_text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 async def send_view(
@@ -131,19 +136,6 @@ async def send_view(
         )
     return await event.reply(
         text, buttons=buttons, parse_mode="html", link_preview=False
-    )
-
-
-async def record_user(event) -> None:
-    """Keep the users table fresh for rosters and announcements."""
-    sender = await event.get_sender()
-    if sender is None:
-        return
-    await db.upsert_user(
-        sender.id,
-        username=getattr(sender, "username", None),
-        first_name=getattr(sender, "first_name", None),
-        last_name=getattr(sender, "last_name", None),
     )
 
 

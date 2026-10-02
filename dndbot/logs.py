@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import logging.handlers
 from pathlib import Path
-from typing import Any
 
 from . import config
 
@@ -116,10 +115,3 @@ def recent_errors(limit: int = 4000, max_entries: int = 12) -> list[str]:
 
     blocks = ["\n".join(lines) for lines in entries if lines]
     return blocks[-max_entries:]
-
-
-def log_exc(message: str, **context: Any) -> None:
-    """Log an error with its traceback plus any useful context."""
-    log = logging.getLogger("dndbot")
-    extra = " ".join(f"{key}={value!r}" for key, value in context.items())
-    log.error("%s%s", message, f" [{extra}]" if extra else "", exc_info=True)

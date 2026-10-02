@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 
 MAX_DICE_PER_TERM = 100
 MAX_TOTAL_DICE = 200
-MAX_EXPLOSION_DEPTH = 10
 MAX_REROLLS = 20
 # Hard ceiling on individual die rolls, so a pathological expression
 # (explosions plus rerolls) cannot spin forever.

@@ -12,6 +12,7 @@ from .. import keyboards as kb
 from ..common import (
     NoCampaign,
     NotAMember,
+    command_argument,
     display_name,
     ensure_member,
     resolve_campaign,
@@ -136,8 +137,7 @@ def register(client) -> None:
     # ------------------------------------------------------------------
     @client.on(events.NewMessage(pattern=r"^/newchar(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def new_character(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        argument = parts[1].strip() if len(parts) > 1 else ""
+        argument = command_argument(event)
         forced = False
         if argument.lower().startswith("force"):
             forced = True
@@ -177,14 +177,10 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/char(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def show_character(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        name = parts[1].strip() if len(parts) > 1 else ""
+        name = command_argument(event)
         try:
             campaign, character = await load_character(event, name)
-        except LookupError as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NoCampaign, NotAMember) as exc:
+        except (LookupError, NoCampaign, NotAMember) as exc:
             await event.reply(str(exc), parse_mode="html")
             return
 
@@ -298,8 +294,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/(?:level|levelup)(?:@[\w_]+)?(?:\s+(\d+))?$"))
     async def change_level(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        target = int(parts[1]) if len(parts) > 1 and parts[1].strip().isdigit() else 0
+        argument = command_argument(event)
+        target = int(argument) if argument.isdigit() else 0
         try:
             campaign, character = await load_character(event)
         except (LookupError, NoCampaign, NotAMember) as exc:
@@ -426,8 +422,7 @@ def register(client) -> None:
             await event.reply(f"You only have one: <b>{safe(mine[0]['name'])}</b>.", parse_mode="html")
             return
 
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else ""
+        term = command_argument(event)
         if not term:
             lines = ["<b>Your characters</b>", ""]
             for character in mine:
@@ -454,8 +449,7 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/note(?:@[\w_]+)?\s+(.*)$"))
     async def set_note(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        note = parts[1].strip() if len(parts) > 1 else ""
+        note = command_argument(event)
         try:
             campaign, character = await load_character(event)
         except (LookupError, NoCampaign, NotAMember) as exc:

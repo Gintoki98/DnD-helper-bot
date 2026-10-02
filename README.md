@@ -56,13 +56,13 @@ database and warms the SRD caches.
 
 ## Playing
 
-Start with **`/tutorial`** — a seven-page walkthrough covering dice, setting
-up as DM, joining a game, character sheets, SRD lookups and groups. Page
-through it with the ◀ ▶ buttons, or jump straight to one:
+Start with **`/tutorial`** — an eight-page walkthrough covering dice, setting
+up as DM, joining a game, character sheets, SRD lookups, encounters and
+groups. Page through it with the ◀ ▶ buttons, or jump straight to one:
 
 ```
 /tutorial          # page 1
-/tutorial dice     # or: setup, join, character, srd, groups
+/tutorial dice     # or: setup, join, character, srd, encounters, groups
 ```
 
 ### Dice
@@ -131,6 +131,84 @@ ability scores, AC/HP/speed) and builds the sheet.
 Ability modifiers, an HP bar, inspiration and a recent-events log are shown.
 Combat initiative modifiers are derived from DEX automatically.
 
+### Encounters (DM only)
+
+Prepare a fight ahead of time, tailor it to your table, then drop it into the
+session.
+
+```
+/newencounter Ambush at the ford | hidden
+/addmonster goblin 3
+/addmonster ogre
+/ms 1 ac 16          # and hp, dmg, atk, count, name, note
+/ms 1 hp 30
+/ms 1 dmg 2d6+4
+/ms 2 note breathes fire
+/ms 3 hide           # a surprise the table cannot see
+/ms 4 nohp           # damage piles up, only /kill brings it down
+/ms 5 boss           # crown on its name, everyone sees it
+/fight Ambush at the ford
+```
+
+During the fight — by anyone at the table:
+
+```
+/hit 1 2d6+3         # roll and damage the first goblin; I remember who did it
+/hit ogre 11         # name a combatant instead of numbering it
+/heal 2 10
+/kill wraith         # DM only: drop it outright, whatever its HP
+/fight               # current state
+/endfight
+```
+
+**What the party is told**
+
+* **Death alerts** — when a combatant falls, everyone is messaged, whoever
+  landed the blow.
+* **The end is announced** — `/endfight` messages every player with the
+  name, how long it ran, how many were left and total damage dealt.
+* **Bosses get a crown** — `/ms 5 boss` puts 👑 next to the name in every
+  list, for the DM and the table alike. Toggle it mid-fight.
+* **Every combatant is numbered.** The number in front of the name is
+  exactly what `/hit N` targets, and it is the order of the *standing*
+  monsters, so the list closes up as things die. Dead ones are marked
+  *no longer a valid target*.
+* **Hidden monsters cannot be probed.** A player who guesses the number
+  of a hidden monster gets *no combatant matching*, so the ambush stays an
+  ambush.
+* **Hidden monsters are simply absent.** The party is never told how many are
+  lurking, because that would give the ambush away.
+* **Reveals are announced.** `/ms 3 show` mid-fight reveals the unit and tells
+  everyone it has revealed itself.
+* **No-HP monsters** (`/ms N nohp`) show only accumulated damage — no bar, no
+  numbers, to anyone. They cannot be dropped by damage; they die when the DM
+  uses `/kill`, which announces it like any other death. Good for wraiths, or
+  anything that should only fall when the story says so.
+
+**Hit points come in two modes, chosen when the encounter is created:**
+
+| Mode | Players see |
+| --- | --- |
+| `visible` (default) | full HP bars, live, as damage lands |
+| `hidden` | **no HP numbers at all** — only the damage dealt and by whom |
+
+In hidden mode a player sees:
+
+```
+Goblin #1 • AC 15
+    15 damage — Sylra 12 • Bront 3
+Goblin #2 • AC 15
+    untouched
+```
+
+while the DM sees the real numbers and a reminder that players cannot.
+Visibility cannot change mid-fight. `/hpmode hidden` or `/hpmode visible`
+switches it between fights.
+
+A `count` of 3 gives three independently-tracked units (`Goblin #1..#3`), so
+killing one does not damage the others. Editing a template never disturbs a
+fight already running — the live fight works on its own copy of the stats.
+
 ### SRD
 
 SRD **5.2.1 (2014)** from dnd5eapi.co, cached to `.cache/` so repeated lookups
@@ -163,8 +241,8 @@ damage types and alignments.
 
 `/tutorial` for the guided walkthrough, `/help` for the reference, and
 `/help dice`, `/help campaign`, `/help session`, `/help character`,
-`/help srd` for one area. `/whoami` shows your id and your characters.
-Type `/` in the chat for the full menu.
+`/help srd`, `/help encounter` for one area. `/whoami` shows your id and
+your characters. Type `/` in the chat for the full menu (60 commands).
 
 ## Layout
 
@@ -182,10 +260,11 @@ dndbot/
   common.py             name/time helpers, campaign resolution, HTML escaping
   handlers/
     core.py             /start, /help, menus
-    tutorial.py         /tutorial walkthrough
+    tutorial.py         /tutorial walkthrough (8 pages)
     dice.py             dice commands and the dice pad
     campaign.py         campaigns, join approvals, sessions
     character.py        character creation and sheets
+    encounter.py       encounter templates, stat editing, live fights
     srd_lookup.py       SRD commands, search and browser
 tests/
   test_units.py         dice parser, paging, escaping (no network)

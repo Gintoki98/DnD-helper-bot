@@ -137,6 +137,51 @@ TUTORIAL_PAGES: list[tuple[str, str]] = [
         "You can also browse by tapping <b>SRD</b> in /start.",
     ),
     (
+        "encounters",
+        "\U0001f91d <b>Encounters (DM only)</b>\n\n"
+        "Prepare a fight ahead of time, then drop it into the session.\n\n"
+        "<b>1.</b> Create it\n"
+        "<code>/newencounter Ambush at the ford | hidden</code>\n"
+        "By default players see hit points. Add <b>hidden</b> and they will "
+        "not \u2014 they will only see the damage dealt and by whom.\n\n"
+        "<b>2.</b> Fill it with monsters (from the SRD)\n"
+        "<code>/addmonster goblin 3</code>\n"
+        "<code>/addmonster ogre</code>\n"
+        "<code>/addmonster goblin x5</code>\n\n"
+        "<b>3.</b> Tailor the stats \u2014 the fight is yours, not the manual\n"
+        "<code>/ms 1 ac 16</code> \u2022 <code>/ms 1 hp 30</code> \u2022 "
+        "<code>/ms 1 dmg 2d6+4</code> \u2022 <code>/ms 1 atk +5</code>\n"
+        "<code>/ms 2 name Dire Ogre</code> \u2022 <code>/ms 2 note breathes fire</code>\n"
+        "<code>/ms 3 hide</code> \u2014 a surprise the table cannot see\n"
+        "<code>/ms 4 nohp</code> \u2014 damage piles up but it will not fall\n"
+        "<code>/ms 5 boss</code> \u2014 crown on its name, everyone sees it\n\n"
+        "<b>4.</b> Start it in the session\n"
+        "<code>/fight Ambush at the ford</code>\n"
+        "I announce it to everyone and track each combatant separately.\n\n"
+        "<b>5.</b> During the fight\n"
+        "<code>/hit 1 2d6+3</code> \u2014 roll and damage the first goblin\n"
+        "<code>/hit ogre 11</code> \u2014 name one instead\n"
+        "<code>/kill wraith</code> \u2014 DM only, drops it outright\n"
+        "<code>/heal 2 10</code> \u2022 <code>/fight</code> \u2014 check the state\n"
+        "<code>/endfight</code>\n\n"
+        "<b>What the table is told</b>\n"
+        "\u2022 When something dies I message everyone \u2014 whoever landed it.\n"
+        "\u2022 Hidden monsters are simply not listed; they never see a count,\n"
+        "  and cannot be hit by number until revealed.\n"
+        "\u2022 Every name carries the number to use: <code>/hit 1 ...</code>.\n"
+        "\u2022 Numbers are the standing order, so they close up as things die.\n"
+        "\u2022 When the fight ends I tell everyone how it went.\n"
+        "\u2022 <code>/ms 3 show</code> mid-fight reveals one and I announce it.\n"
+        "\u2022 A no-HP monster shows only the damage dealt. Players get no\n"
+        "  hint of its condition until you <code>/kill</code> it.\n\n"
+        "<i>Editing the encounter never disturbs a fight already running.</i>\n\n"
+        "<b>Other commands</b>\n"
+        "<code>/encounters</code> \u2014 everything you have prepared\n"
+        "<code>/enc Name</code> \u2014 open one\n"
+        "<code>/hpmode hidden</code> \u2014 switch visibility between fights\n"
+        "<code>/delenc Name</code> \u2014 remove it",
+    ),
+    (
         "groups",
         "\U0001f465 <b>Groups and housekeeping</b>\n\n"
         "<b>Using me in a group</b>\n"
@@ -180,7 +225,8 @@ def keyboard(page: int = 0) -> list:
 PAGE_KEYS = [key for key, _ in TUTORIAL_PAGES]
 ALIASES = {"dm": "setup", "campaign": "setup", "character": "character",
            "characters": "character", "dice": "dice", "srd": "srd", "join": "join",
-           "groups": "groups", "help": "start"}
+           "groups": "groups", "help": "start", "fight": "encounters",
+           "combat": "encounters", "monsters": "encounters"}
 
 
 async def send(event, page: int = 0, replace: bool | None = None) -> None:

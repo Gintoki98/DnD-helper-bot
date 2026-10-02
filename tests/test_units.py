@@ -215,6 +215,47 @@ def test_helpers() -> None:
           not (set("01O") & set(new_invite_code(200))), "saw a confusable character")
 
 
+def test_display_name() -> None:
+    """display_name must handle every shape a name arrives in.
+
+    sqlite3.Row supports key access but not attribute access, which once made
+    every roster and damage-log entry read "Someone".
+    """
+    from types import SimpleNamespace
+
+    import sqlite3
+
+    from dndbot.common import display_name, plain_name
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row  # aiosqlite does this for us
+    row = connection.execute(
+        "SELECT 'Sylra' AS first_name, 'Vane' AS last_name, 'sylva' AS username"
+    ).fetchone()
+    check("sqlite3.Row has no attribute access", not hasattr(row, "first_name"),
+          "fixture is not a Row")
+    check("sqlite3.Row gives a name", "Sylra" in display_name(row), display_name(row))
+    check("sqlite3.Row username shown", "@sylva" in display_name(row), display_name(row))
+    check("plain_name strips markup", "<code>" not in plain_name(row), plain_name(row))
+
+    entity = SimpleNamespace(first_name="Ogre", last_name=None, username="ogreboss")
+    check("Telethon entity works", display_name(entity).startswith("Ogre"), display_name(entity))
+
+    mapping = {"first_name": "A", "last_name": "B", "username": "ab"}
+    check("dict works", "A B" in display_name(mapping), display_name(mapping))
+
+    only_username = {"first_name": None, "last_name": None, "username": "zed"}
+    check("username-only fallback", "@zed" in display_name(only_username),
+          display_name(only_username))
+
+    check("None is Someone", display_name(None) == "Someone", display_name(None))
+    check("plain string passes through", display_name("Sylra") == "Sylra", "changed")
+
+    hostile = {"first_name": "<b>Evil</b> & co", "username": "evil"}
+    rendered = display_name(hostile)
+    check("names are html-escaped", "<b>" not in rendered and "&lt;b&gt;" in rendered, rendered)
+
+
 def report() -> int:
     print(f"\n{'=' * 60}")
     print(f"checks passed: {len(PASS)}")
@@ -246,4 +287,5 @@ if __name__ == "__main__":
     test_split_pages()
     test_categories()
     test_helpers()
+    test_display_name()
     sys.exit(report())

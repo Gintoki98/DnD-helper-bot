@@ -64,6 +64,25 @@ HELP_SRD = (
     "<i>Fuzzy matching: <code>/monster ancient red drgn</code> finds the red dragon.</i>"
 )
 
+HELP_ENCOUNTERS = (
+    "<b>\U0001f91d Encounters (DM only)</b>\n"
+    "<code>/newencounter Name | hidden</code> \u2014 prepare a fight\n"
+    "<code>/addmonster goblin 3</code> \u2014 pull monsters from the SRD\n"
+    "<code>/ms 1 ac 16</code> \u2014 tailor stats (also hp, dmg, atk, count, hide)\n"
+    "<code>/encounters</code> \u2022 <code>/enc Name</code> \u2022 "
+    "<code>/hpmode hidden</code>\n"
+    "\n"
+    "<b>In session</b>\n"
+    "<code>/fight Name</code> \u2014 the DM starts it, everyone is notified\n"
+    "<code>/hit 1 2d6+3</code> \u2014 damage (rolls dice, remembers who did it)\n"
+    "<code>/kill 2</code> \u2014 DM only, drops a combatant outright\n"
+    "<code>/heal 1 10</code> \u2022 <code>/fight</code> \u2022 <code>/endfight</code>\n"
+    "<i>With <b>hidden</b> HP, players see the damage they dealt but never the "
+    "monster's numbers. <code>/ms N hide</code> keeps one out of the list entirely; "
+    "<code>/ms N nohp</code> makes one fall only to /kill. Deaths and reveals are "
+    "announced to the party.</i>"
+)
+
 WELCOME = (
     "\U0001f3df\ufe0f <b>D&amp;D Helper</b>\n\n"
     "Dice, campaign sessions, character sheets and the whole SRD at your table.\n\n"
@@ -109,6 +128,7 @@ def register(client) -> None:
             "character": HELP_CHARACTER,
             "characters": HELP_CHARACTER,
             "srd": HELP_SRD,
+            "encounter": HELP_ENCOUNTERS, "encounters": HELP_ENCOUNTERS,
         }
         if topic and topic in pages:
             await event.reply(f"{pages[topic]}\n\n<i>/help for everything</i>", parse_mode="html")
@@ -116,7 +136,7 @@ def register(client) -> None:
         if topic and topic not in pages:
             await event.reply(
                 f"No help topic <code>{topic}</code>. Try: dice, campaign, session, "
-                "character or srd.",
+                "character, srd or encounter.",
                 parse_mode="html",
             )
             return
@@ -134,7 +154,7 @@ def register(client) -> None:
                     ("Sessions", "menu:help:session"),
                     ("Characters", "menu:help:character"),
                 ],
-                [("SRD", "menu:help:srd")],
+                [("SRD", "menu:help:srd"), ("Encounters", "menu:help:encounter")],
                 [Button.inline("\U0001f4d6 Tutorial", "tut:0")],
             ],
             parse_mode="html",
@@ -222,6 +242,8 @@ def register(client) -> None:
                 "session": HELP_SESSION,
                 "character": HELP_CHARACTER,
                 "srd": HELP_SRD,
+                "encounter": HELP_ENCOUNTERS,
+                "encounters": HELP_ENCOUNTERS,
             }.get(rest[0] if rest else "", HELP_DICE)
             await event.edit(page, buttons=kb.main_menu(), parse_mode="html")
             await event.answer()

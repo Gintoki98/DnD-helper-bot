@@ -25,35 +25,60 @@ def safe(text: Any) -> str:
     return html.escape(str(text if text is not None else ""), quote=False)
 
 
+def _field(user: Any, name: str) -> Any:
+    """Read a field from a Telethon entity, a dict, or a sqlite3.Row.
+
+    sqlite3.Row supports key access but not attribute access, so the naive
+    ``getattr`` route silently returns nothing for every database row.
+    """
+    if isinstance(user, dict):
+        return user.get(name)
+    if hasattr(user, "keys"):  # sqlite3.Row behaves like a mapping
+        try:
+            return user[name]
+        except (IndexError, KeyError):
+            return None
+    return getattr(user, name, None)
+
+
 def display_name(user: Any) -> str:
     """A stable, human-readable name for a user or a stored roster row."""
     if user is None:
         return "Someone"
     if isinstance(user, str):
         return user
-    first = (getattr(user, "first_name", "") or "").strip()
-    last = (getattr(user, "last_name", "") or "").strip()
+
+    first = str(_field(user, "first_name") or "").strip()
+    last = str(_field(user, "last_name") or "").strip()
+    username = _field(user, "username")
+
     name = " ".join(safe(part) for part in (first, last) if part)
-    if not name and isinstance(user, dict):
-        name = " ".join(
-            safe(part) for part in ((user.get("first_name") or ""), (user.get("last_name") or ""))
-            if part
-        ).strip()
+    if not name and username:
+        return f"<code>@{safe(username)}</code>"
     if not name:
-        username = getattr(user, "username", None)
-        if not username and isinstance(user, dict):
-            username = user.get("username")
-        if username:
-            return f"<code>@{safe(username)}</code>"
         return "Someone"
-    username = getattr(user, "username", None)
-    if not username and isinstance(user, dict):
-        username = user.get("username")
-    return f"{name} <code>@{safe(username)}</code>" if username else name
+    if username:
+        return f"{name} <code>@{safe(username)}</code>"
+    return name
 
 
 def plain_name(user: Any) -> str:
     return _strip_tags(display_name(user))
+
+
+def short_name(user: Any) -> str:
+    """Just the name, no @username - too tight for inline damage credits."""
+    if user is None:
+        return "Someone"
+    if isinstance(user, str):
+        return user
+    first = str(_field(user, "first_name") or "").strip()
+    last = str(_field(user, "last_name") or "").strip()
+    name = " ".join(safe(part) for part in (first, last) if part)
+    if name:
+        return name
+    username = _field(user, "username")
+    return f"@{username}" if username else "Someone"
 
 
 def _strip_tags(text: str) -> str:

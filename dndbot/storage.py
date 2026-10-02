@@ -142,6 +142,43 @@ def new_invite_code(length: int = 6) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+# Columns and fallback values for a new character row. ``create_character``
+# fills anything the caller leaves out, so the wizard only sends what it knows.
+CHARACTER_DEFAULTS: dict[str, Any] = {
+    "campaign_id": 0,
+    "user_id": 0,
+    "name": "Unnamed",
+    "class_name": "",
+    "race": "",
+    "background": "",
+    "subclass": "",
+    "alignment": "",
+    "level": 1,
+    "xp": 0,
+    "hp": 1,
+    "max_hp": 1,
+    "temp_hp": 0,
+    "ac": 10,
+    "initiative": 0,
+    "speed": 30,
+    "str": 10,
+    "dex": 10,
+    "con": 10,
+    "intl": 10,
+    "wis": 10,
+    "cha": 10,
+    "inspiration": 0,
+    "gold": 0,
+    "notes": "",
+}
+
+# The columns ``update_character`` will accept; the bookkeeping ones stay read-only.
+UPDATABLE_CHARACTER_FIELDS = (frozenset(CHARACTER_DEFAULTS) | {"is_active"}) - {
+    "campaign_id",
+    "user_id",
+}
+
+
 class Database:
     def __init__(self, path: Any = None) -> None:
         self.path = str(path or config.DB_PATH)
@@ -275,6 +312,17 @@ class Database:
         return await self._fetchone(
             "SELECT * FROM campaigns WHERE invite_code = ? COLLATE NOCASE", (code.strip(),)
         )
+
+    async def lookup_campaign(self, term: str) -> Any:
+        """The campaign a player typed: exact invite code first, else best name match.
+
+        Returns ``None`` when nothing matches, so callers can reply once.
+        """
+        row = await self.get_campaign_by_code(term)
+        if row is not None:
+            return row
+        matches = await self.find_campaigns(term)
+        return matches[0] if matches else None
 
     async def find_campaigns(self, term: str) -> list[Any]:
         """Campaigns whose name contains the term, best matches first."""
@@ -468,33 +516,7 @@ class Database:
     # -- characters -----------------------------------------------------
     async def create_character(self, **fields: Any) -> Any:
         now = time.time()
-        defaults: dict[str, Any] = {
-            "campaign_id": 0,
-            "user_id": 0,
-            "name": "Unnamed",
-            "class_name": "",
-            "race": "",
-            "background": "",
-            "subclass": "",
-            "alignment": "",
-            "level": 1,
-            "xp": 0,
-            "hp": 1,
-            "max_hp": 1,
-            "temp_hp": 0,
-            "ac": 10,
-            "initiative": 0,
-            "speed": 30,
-            "str": 10,
-            "dex": 10,
-            "con": 10,
-            "intl": 10,
-            "wis": 10,
-            "cha": 10,
-            "inspiration": 0,
-            "gold": 0,
-            "notes": "",
-        }
+        defaults = dict(CHARACTER_DEFAULTS)
         defaults.update({k: v for k, v in fields.items() if v is not None})
         columns = ", ".join(defaults) + ", created_at, updated_at"
         placeholders = ", ".join("?" * (len(defaults) + 2))
@@ -544,13 +566,7 @@ class Database:
     async def update_character(self, character_id: int, **fields: Any) -> Any:
         if not fields:
             return await self.get_character(character_id)
-        allowed = {
-            "name", "class_name", "race", "background", "subclass", "alignment",
-            "level", "xp", "hp", "max_hp", "temp_hp", "ac", "initiative", "speed",
-            "str", "dex", "con", "intl", "wis", "cha", "inspiration", "gold",
-            "notes", "is_active",
-        }
-        clean = {k: v for k, v in fields.items() if k in allowed}
+        clean = {k: v for k, v in fields.items() if k in UPDATABLE_CHARACTER_FIELDS}
         if not clean:
             return await self.get_character(character_id)
         assignments = ", ".join(f"{key} = ?" for key in clean)

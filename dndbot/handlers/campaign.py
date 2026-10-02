@@ -11,12 +11,12 @@ from .. import config, keyboards as kb
 from ..common import (
     NoCampaign,
     NotAMember,
-    NotTheDM,
     command_argument,
     display_name,
+    dm_campaign,
     duration,
-    ensure_dm,
     ensure_member,
+    member_campaign,
     plain_name,
     relative,
     resolve_campaign,
@@ -36,6 +36,28 @@ def campaign_summary(campaign, is_dm: bool, has_session: bool) -> str:
     ]
     if campaign["description"]:
         lines += ["", campaign["description"]]
+    return "\n".join(lines)
+
+
+def session_started_text(campaign, title: str, party: list) -> str:
+    """The ``/startsession`` confirmation: heading, party snapshot, next moves."""
+    heading = f"<b>\U0001f5c3\ufe0f Session started</b>\n<i>{safe(campaign['name'])}"
+    if title:
+        heading += f" \u2014 {safe(title)}"
+    heading += "</i>"
+
+    lines = [heading, "", f"Players tracked: <b>{len(party)}</b>"]
+    if party:
+        lines.append("")
+        lines += [
+            f"• <b>{safe(p['name'])}</b> <i>{safe(p['class_name'])}</i> {p['hp']}/{p['max_hp']} HP"
+            for p in party
+        ]
+    lines += [
+        "",
+        "<i>/checkin when you arrive \u2022 /who to see the table \u2022 "
+        "/init to roll initiative \u2022 /endsession when you are done</i>",
+    ]
     return "\n".join(lines)
 
 
@@ -70,6 +92,45 @@ async def tell_dm(client, campaign, request, applicant_name: str) -> None:
         )
     except Exception:
         pass  # DM unreachable; /pending still lists it
+
+
+async def _approve_join(event, request, campaign, who: str) -> None:
+    """Record an approval: update the roster, the prompt, and the applicant."""
+    await db.resolve_request(request["id"], "approved", event.sender_id)
+    await db.add_member(campaign["id"], request["user_id"])
+    await db.set_active_campaign(request["user_id"], campaign["id"])
+    await event.edit(
+        f"\u2705 <b>{who}</b> joined <b>{safe(campaign['name'])}</b>.", parse_mode="html"
+    )
+    await event.answer("Approved")
+    try:
+        await event.client.send_message(
+            request["user_id"],
+            f"\U0001f389 You are in! <b>{safe(campaign['name'])}</b> was approved by the DM.\n\n"
+            f"Invite code: <code>{campaign['invite_code']}</code>\n"
+            "Start a character with <code>/newchar</code>.",
+            buttons=kb.campaign_keyboard(campaign["id"], False, False),
+            parse_mode="html",
+        )
+    except Exception:
+        pass  # applicant unreachable; they can still /join later
+
+
+async def _decline_join(event, request, campaign, who: str) -> None:
+    """Record a rejection: update the prompt and tell the applicant."""
+    await db.resolve_request(request["id"], "rejected", event.sender_id)
+    await event.edit(
+        f"\u274c Request from <b>{who}</b> declined.", parse_mode="html"
+    )
+    await event.answer("Denied")
+    try:
+        await event.client.send_message(
+            request["user_id"],
+            f"Your request to join <b>{safe(campaign['name'])}</b> was declined by the DM.",
+            parse_mode="html",
+        )
+    except Exception:
+        pass  # applicant unreachable
 
 
 def register(client) -> None:
@@ -137,10 +198,7 @@ def register(client) -> None:
             await event.reply(f"You are already in:\n\n{names}", parse_mode="html")
             return
 
-        row = await db.get_campaign_by_code(term)
-        if row is None:
-            matches = await db.find_campaigns(term)
-            row = matches[0] if matches else None
+        row = await db.lookup_campaign(term)
         if row is None:
             await event.reply(
                 f"No campaign matches <code>{term}</code>.\n"
@@ -171,14 +229,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/pending(?:@[\w_]+)?$"))
     async def pending_requests(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_dm(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NotAMember, NotTheDM) as exc:
-            await event.reply(str(exc))
+        campaign = await dm_campaign(event)
+        if campaign is None:
             return
 
         requests = await db.pending_requests(campaign["id"])
@@ -196,12 +248,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/(?:campaign|camp)(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def campaign_panel(event: events.NewMessage.Event) -> None:
-        term = command_argument(event)
-        try:
-            campaign = await resolve_campaign(event, term)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event, command_argument(event))
+        if campaign is None:
             return
 
         is_dm = await db.is_dm(campaign["id"], event.sender_id)
@@ -246,10 +294,7 @@ def register(client) -> None:
             return
         term = command_argument(event)
         if term:
-            match = await db.get_campaign_by_code(term)
-            if match is None:
-                found = await db.find_campaigns(term)
-                match = found[0] if found else None
+            match = await db.lookup_campaign(term)
             if match is None:
                 await event.reply(f"No campaign called <code>{term}</code>.", parse_mode="html")
                 return
@@ -273,12 +318,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/roster(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def roster_command(event: events.NewMessage.Event) -> None:
-        term = command_argument(event)
-        try:
-            campaign = await resolve_campaign(event, term)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event, command_argument(event))
+        if campaign is None:
             return
 
         members = await db.roster(campaign["id"])
@@ -339,14 +380,8 @@ def register(client) -> None:
     # ------------------------------------------------------------------
     @client.on(events.NewMessage(pattern=r"^/startsession(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def start_session(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_dm(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NotAMember, NotTheDM) as exc:
-            await event.reply(str(exc))
+        campaign = await dm_campaign(event)
+        if campaign is None:
             return
 
         if await db.active_session(campaign["id"]):
@@ -361,26 +396,8 @@ def register(client) -> None:
         await db.touch_campaign(campaign["id"])
 
         party = await db.party(campaign["id"])
-        heading = f"<b>\U0001f5c3\ufe0f Session started</b>\n<i>{safe(campaign['name'])}"
-        if title:
-            heading += f" \u2014 {safe(title)}"
-        heading += "</i>"
-
-        lines = [heading, "", f"Players tracked: <b>{len(party)}</b>"]
-        if party:
-            lines.append("")
-            lines += [
-                f"• <b>{safe(p['name'])}</b> <i>{safe(p['class_name'])}</i> {p['hp']}/{p['max_hp']} HP"
-                for p in party
-            ]
-        lines += [
-            "",
-            "<i>/checkin when you arrive \u2022 /who to see the table \u2022 "
-            "/init to roll initiative \u2022 /endsession when you are done</i>",
-        ]
-
         await event.reply(
-            "\n".join(lines),
+            session_started_text(campaign, title, party),
             buttons=kb.campaign_keyboard(campaign["id"], True, True),
             parse_mode="html",
         )
@@ -394,14 +411,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/endsession(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def end_session(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_dm(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NotAMember, NotTheDM) as exc:
-            await event.reply(str(exc))
+        campaign = await dm_campaign(event)
+        if campaign is None:
             return
 
         active = await db.active_session(campaign["id"])
@@ -427,11 +438,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/session(?:@[\w_]+)?$"))
     async def session_status(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event)
+        if campaign is None:
             return
 
         history = await db.recent_sessions(campaign["id"], 6)
@@ -458,11 +466,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/who(?:@[\w_]+)?$"))
     async def who_is_here(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event)
+        if campaign is None:
             return
 
         active = await db.active_session(campaign["id"])
@@ -516,14 +521,8 @@ def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/announce(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def announce(event: events.NewMessage.Event) -> None:
         text = command_argument(event)
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_dm(campaign, event.sender_id)
-        except NoCampaign as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NotAMember, NotTheDM) as exc:
-            await event.reply(str(exc))
+        campaign = await dm_campaign(event)
+        if campaign is None:
             return
 
         if not text:
@@ -563,38 +562,9 @@ def register(client) -> None:
         who = plain_name(applicant)
 
         if decision == "y":
-            await db.resolve_request(request["id"], "approved", event.sender_id)
-            await db.add_member(campaign["id"], request["user_id"])
-            await db.set_active_campaign(request["user_id"], campaign["id"])
-            await event.edit(
-                f"\u2705 <b>{who}</b> joined <b>{safe(campaign['name'])}</b>.", parse_mode="html"
-            )
-            await event.answer("Approved")
-            try:
-                await event.client.send_message(
-                    request["user_id"],
-                    f"\U0001f389 You are in! <b>{safe(campaign['name'])}</b> was approved by the DM.\n\n"
-                    f"Invite code: <code>{campaign['invite_code']}</code>\n"
-                    "Start a character with <code>/newchar</code>.",
-                    buttons=kb.campaign_keyboard(campaign["id"], False, False),
-                    parse_mode="html",
-                )
-            except Exception:
-                pass
+            await _approve_join(event, request, campaign, who)
         else:
-            await db.resolve_request(request["id"], "rejected", event.sender_id)
-            await event.edit(
-                f"\u274c Request from <b>{who}</b> declined.", parse_mode="html"
-            )
-            await event.answer("Denied")
-            try:
-                await event.client.send_message(
-                    request["user_id"],
-                    f"Your request to join <b>{safe(campaign['name'])}</b> was declined by the DM.",
-                    parse_mode="html",
-                )
-            except Exception:
-                pass
+            await _decline_join(event, request, campaign, who)
 
     @client.on(events.CallbackQuery(pattern=r"^camp:"))
     async def campaign_buttons(event: events.CallbackQuery.Event) -> None:

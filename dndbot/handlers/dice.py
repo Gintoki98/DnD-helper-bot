@@ -5,8 +5,10 @@ from __future__ import annotations
 from telethon import events
 
 from .. import keyboards as kb
-from ..common import command_argument, display_name, safe
+from ..common import command_argument, display_name, resolve_campaign, safe
 from ..dice import DiceError, RollResult, roll
+from ..storage import db
+from .srd_lookup import send_entry
 
 # user_id -> the expression currently being typed on the dice pad
 PAD: dict[int, str] = {}
@@ -82,9 +84,6 @@ def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/init(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def initiative_command(event: events.NewMessage.Event) -> None:
         """Roll initiative for everyone who has a character in this campaign."""
-        from ..common import resolve_campaign
-        from ..storage import db
-
         bonus = 0
         argument = command_argument(event)
         if argument:
@@ -174,8 +173,6 @@ def register(client) -> None:
             )
             return
         elif op == "encounter":
-            from .srd_lookup import send_entry
-
             await event.answer("Searching for a random monster\u2026")
             # replace=False: the message under this button shows a roll, so the
             # monster has to arrive as a new message.

@@ -210,6 +210,19 @@ def _roll_die(sides: int) -> int:
     return random.randint(1, sides)
 
 
+def _apply_keep(term: Term) -> None:
+    """Drop every die beyond ``keep_n``, best (kh) or worst (kl) first."""
+    if not term.keep or len(term.dice) <= term.keep_n:
+        return
+    ordered = sorted(
+        range(len(term.dice)),
+        key=lambda i: term.dice[i].value,
+        reverse=term.keep == "kh",
+    )
+    for i in ordered[term.keep_n :]:
+        term.dice[i].kept = False
+
+
 def _roll_term(term: Term) -> None:
     """Roll one term, applying rerolls and explosions before keep/drop."""
     dice: list[Die] = []
@@ -244,15 +257,7 @@ def _roll_term(term: Term) -> None:
                 queue.append((1, note))
 
     term.dice = dice
-
-    if term.keep and len(term.dice) > term.keep_n:
-        ordered = sorted(
-            range(len(term.dice)),
-            key=lambda i: term.dice[i].value,
-            reverse=term.keep == "kh",
-        )
-        for i in ordered[term.keep_n :]:
-            term.dice[i].kept = False
+    _apply_keep(term)
 
 
 def roll(expression: str) -> RollResult:

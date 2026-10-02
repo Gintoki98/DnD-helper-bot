@@ -161,10 +161,7 @@ async def resolve_campaign(event, argument: str | None = None) -> Any:
 
     if argument:
         term = argument.strip()
-        row = await db.get_campaign_by_code(term)
-        if row is None:
-            matches = await db.find_campaigns(term)
-            row = matches[0] if matches else None
+        row = await db.lookup_campaign(term)
         if row is None:
             raise NoCampaign(f"I do not know a campaign called <code>{term}</code>.")
         await db.set_active_campaign(user_id, row["id"])
@@ -215,6 +212,38 @@ async def ensure_dm(campaign, user_id: int) -> None:
     membership = await db.membership(campaign["id"], user_id)
     if membership is None or membership["role"] != "dm":
         raise NotTheDM("Only the DM can do that.")
+
+
+async def member_campaign(event, argument: str | None = None) -> Any:
+    """The campaign a member-only command acts on, or ``None`` after replying.
+
+    Resolves the campaign, enforces membership and answers the player itself,
+    so each command can start with one call and a guard clause.
+    """
+    try:
+        campaign = await resolve_campaign(event, argument)
+        await ensure_member(campaign, event.sender_id)
+    except (NoCampaign, NotAMember) as exc:
+        await event.reply(str(exc), parse_mode="html")
+        return None
+    return campaign
+
+
+async def dm_campaign(event, argument: str | None = None) -> Any:
+    """The campaign a DM-only command acts on, or ``None`` after replying.
+
+    Same contract as :func:`member_campaign`, but only the DM passes.
+    """
+    try:
+        campaign = await resolve_campaign(event, argument)
+        await ensure_dm(campaign, event.sender_id)
+    except NoCampaign as exc:
+        await event.reply(str(exc), parse_mode="html")
+        return None
+    except (NotAMember, NotTheDM) as exc:
+        await event.reply(str(exc))
+        return None
+    return campaign
 
 
 def is_admin(user_id: int | None) -> bool:

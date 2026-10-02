@@ -7,6 +7,7 @@ from telethon import Button, events
 from .. import keyboards as kb
 from ..common import command_argument, display_name, is_admin, safe
 from ..formatting import esc as escape
+from ..logs import errors_path, recent_errors
 from ..storage import db
 
 HELP_DICE = (
@@ -159,8 +160,6 @@ def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/errors(?:@[\w_]+)?$"))
     async def errors_command(event: events.NewMessage.Event) -> None:
         """Show the tail of the error log. Anyone may read it."""
-        from ..logs import errors_path, recent_errors
-
         entries = recent_errors(max_entries=8)
         path = errors_path()
         if not entries:

@@ -3,6 +3,8 @@
 *.session
 *.session-journal
 *.db
+*.db-shm
+*.db-wal
 .cache/
 __pycache__/
 *.py[cod]

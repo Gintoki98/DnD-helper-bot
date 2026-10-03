@@ -8,6 +8,7 @@ is plenty for a table-sized group chat.
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import time
 from typing import Any, Sequence
@@ -128,8 +129,105 @@ CREATE TABLE IF NOT EXISTS character_events (
     created_at   REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_character ON character_events(character_id, id);
+
+-- Encounters are built as a reusable template before play, then invoked in a
+-- session. HP visibility is fixed when the template is created.
+CREATE TABLE IF NOT EXISTS encounters (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    created_by  INTEGER NOT NULL,
+    name        TEXT    NOT NULL,
+    notes       TEXT    NOT NULL DEFAULT '',
+    hp_mode     TEXT    NOT NULL DEFAULT 'visible',  -- 'visible' | 'hidden'
+    status      TEXT    NOT NULL DEFAULT 'draft',    -- 'draft' | 'ready'
+    created_at  REAL    NOT NULL,
+    updated_at  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS encounter_monsters (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+    slot         INTEGER NOT NULL DEFAULT 0,
+    name         TEXT    NOT NULL,
+    srd_index    TEXT    NOT NULL DEFAULT '',
+    count        INTEGER NOT NULL DEFAULT 1,
+    ac           INTEGER NOT NULL DEFAULT 10,
+    max_hp       INTEGER NOT NULL DEFAULT 1,
+    speed        INTEGER NOT NULL DEFAULT 30,
+    cr           TEXT    NOT NULL DEFAULT '',
+    size         TEXT    NOT NULL DEFAULT '',
+    mtype        TEXT    NOT NULL DEFAULT '',
+    alignment    TEXT    NOT NULL DEFAULT '',
+    str          INTEGER NOT NULL DEFAULT 10,
+    dex          INTEGER NOT NULL DEFAULT 10,
+    con          INTEGER NOT NULL DEFAULT 10,
+    intl         INTEGER NOT NULL DEFAULT 10,
+    wis          INTEGER NOT NULL DEFAULT 10,
+    cha          INTEGER NOT NULL DEFAULT 10,
+    attack_bonus INTEGER NOT NULL DEFAULT 0,
+    damage       TEXT    NOT NULL DEFAULT '1d6',
+    no_hp        INTEGER NOT NULL DEFAULT 0,
+    is_boss      INTEGER NOT NULL DEFAULT 0,
+    resistances  TEXT    NOT NULL DEFAULT '',
+    immunities   TEXT    NOT NULL DEFAULT '',
+    condition_immunity TEXT NOT NULL DEFAULT '',
+    hidden       INTEGER NOT NULL DEFAULT 0,
+    notes        TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_enc_monsters ON encounter_monsters(encounter_id, slot);
+
+CREATE TABLE IF NOT EXISTS encounter_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+    campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+    session_id  INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    started_by  INTEGER NOT NULL,
+    started_at  REAL    NOT NULL,
+    ended_at    REAL,
+    status      TEXT    NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON encounter_runs(campaign_id, status);
+
+CREATE TABLE IF NOT EXISTS encounter_units (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       INTEGER NOT NULL REFERENCES encounter_runs(id) ON DELETE CASCADE,
+    monster_id   INTEGER NOT NULL REFERENCES encounter_monsters(id) ON DELETE CASCADE,
+    label        TEXT    NOT NULL,
+    ac           INTEGER NOT NULL DEFAULT 10,
+    hp           INTEGER NOT NULL DEFAULT 1,
+    max_hp       INTEGER NOT NULL DEFAULT 1,
+    attack_bonus INTEGER NOT NULL DEFAULT 0,
+    damage       TEXT    NOT NULL DEFAULT '',
+    hidden       INTEGER NOT NULL DEFAULT 0,
+    no_hp        INTEGER NOT NULL DEFAULT 0,
+    is_boss      INTEGER NOT NULL DEFAULT 0,
+    status       TEXT    NOT NULL DEFAULT 'alive',
+    sort_order   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_units_run ON encounter_units(run_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS encounter_damage (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      INTEGER NOT NULL REFERENCES encounter_runs(id) ON DELETE CASCADE,
+    unit_id     INTEGER NOT NULL REFERENCES encounter_units(id) ON DELETE CASCADE,
+    actor_id    INTEGER,
+    amount      INTEGER NOT NULL,
+    detail      TEXT    NOT NULL DEFAULT '',
+    remaining   INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_damage_unit ON encounter_damage(unit_id, id);
 """
 
+# Columns added after a table first shipped. CREATE TABLE IF NOT EXISTS will
+# not add these to a table that already exists, so they go on via ALTER TABLE.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("encounter_monsters", "no_hp", "INTEGER NOT NULL DEFAULT 0"),
+    ("encounter_units", "no_hp", "INTEGER NOT NULL DEFAULT 0"),
+    ("encounter_monsters", "is_boss", "INTEGER NOT NULL DEFAULT 0"),
+    ("encounter_units", "is_boss", "INTEGER NOT NULL DEFAULT 0"),
+)
 
 def ability_modifier(score: int) -> int:
     """5e ability modifier: floor((score - 10) / 2)."""
@@ -190,7 +288,30 @@ class Database:
         self._db = await aiosqlite.connect(self.path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """Add any columns a previous version of the schema did not have."""
+        for table, column, definition in MIGRATIONS:
+            try:
+                async with self._db.execute(f"PRAGMA table_info({table})") as cur:
+                    existing = {row["name"] for row in await cur.fetchall()}
+            except Exception:
+                continue
+            if not existing or column in existing:
+                continue  # table not present yet, or already migrated
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
+                logging.getLogger("dndbot").info(
+                    "migrated %s: added column %s", table, column
+                )
+            except Exception:
+                logging.getLogger("dndbot").warning(
+                    "could not add %s.%s", table, column, exc_info=True
+                )
 
     async def close(self) -> None:
         if self._db is not None:
@@ -604,6 +725,346 @@ class Database:
         return await self._fetchall(
             "SELECT * FROM character_events WHERE character_id = ? ORDER BY id DESC LIMIT ?",
             (character_id, limit),
+        )
+
+    # -- encounters ------------------------------------------------------
+    async def create_encounter(
+        self,
+        campaign_id: int,
+        created_by: int,
+        name: str,
+        notes: str = "",
+        hp_mode: str = "visible",
+    ) -> Any:
+        encounter_id = await self._insert(
+            "INSERT INTO encounters (campaign_id, created_by, name, notes, hp_mode,"
+            " status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)",
+            (campaign_id, created_by, name, notes, hp_mode, time.time(), time.time()),
+        )
+        await self.touch_campaign(campaign_id)
+        return await self.get_encounter(encounter_id)
+
+    async def get_encounter(self, encounter_id: int) -> Any:
+        return await self._fetchone("SELECT * FROM encounters WHERE id = ?", (encounter_id,))
+
+    async def list_encounters(self, campaign_id: int) -> list[Any]:
+        return await self._fetchall(
+            "SELECT * FROM encounters WHERE campaign_id = ? ORDER BY updated_at DESC",
+            (campaign_id,),
+        )
+
+    async def find_encounter(self, campaign_id: int, term: str) -> Any:
+        """Match an encounter by id, exact name, prefix or substring."""
+        if term.isdigit():
+            row = await self._fetchone(
+                "SELECT * FROM encounters WHERE campaign_id = ? AND id = ?",
+                (campaign_id, int(term)),
+            )
+            if row is not None:
+                return row
+        return await self._fetchone(
+            "SELECT * FROM encounters WHERE campaign_id = ?"
+            " AND name LIKE ? COLLATE NOCASE"
+            " ORDER BY (name = ? COLLATE NOCASE) DESC, length(name) LIMIT 1",
+            (campaign_id, f"{term}%", term),
+        )
+
+    async def update_encounter(self, encounter_id: int, **fields: Any) -> Any:
+        allowed = {"name", "notes", "hp_mode", "status"}
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if clean:
+            assignments = ", ".join(f"{key} = ?" for key in clean)
+            await self._write(
+                f"UPDATE encounters SET {assignments}, updated_at = ? WHERE id = ?",
+                list(clean.values()) + [time.time(), encounter_id],
+            )
+        return await self.get_encounter(encounter_id)
+
+    async def delete_encounter(self, encounter_id: int) -> None:
+        await self._write("DELETE FROM encounters WHERE id = ?", (encounter_id,))
+
+    # -- encounter monsters ---------------------------------------------
+    async def add_encounter_monster(self, encounter_id: int, **fields: Any) -> Any:
+        row = await self._fetchone(
+            "SELECT COALESCE(MAX(slot), 0) + 1 AS next FROM encounter_monsters"
+            " WHERE encounter_id = ?",
+            (encounter_id,),
+        )
+        slot = int(row["next"]) if row else 1
+        defaults: dict[str, Any] = {
+            "slot": slot,
+            "name": "Monster",
+            "srd_index": "",
+            "count": 1,
+            "ac": 10,
+            "max_hp": 1,
+            "speed": 30,
+            "cr": "",
+            "size": "",
+            "mtype": "",
+            "alignment": "",
+            "str": 10, "dex": 10, "con": 10, "intl": 10, "wis": 10, "cha": 10,
+            "attack_bonus": 0,
+            "damage": "1d6",
+            "no_hp": 0,
+            "is_boss": 0,
+            "resistances": "",
+            "immunities": "",
+            "condition_immunity": "",
+            "hidden": 0,
+            "notes": "",
+        }
+        defaults.update({key: value for key, value in fields.items() if value is not None})
+        columns = ", ".join(defaults)
+        placeholders = ", ".join("?" * len(defaults))
+        monster_id = await self._insert(
+            f"INSERT INTO encounter_monsters (encounter_id, {columns})"
+            f" VALUES (?, {placeholders})",
+            [encounter_id] + list(defaults.values()),
+        )
+        return await self._get_encounter_monster(monster_id)
+
+    async def _get_encounter_monster(self, monster_id: int) -> Any:
+        return await self._fetchone(
+            "SELECT * FROM encounter_monsters WHERE id = ?", (monster_id,)
+        )
+
+    async def encounter_monsters(self, encounter_id: int) -> list[Any]:
+        return await self._fetchall(
+            "SELECT * FROM encounter_monsters WHERE encounter_id = ? ORDER BY slot",
+            (encounter_id,),
+        )
+
+    async def update_encounter_monster(self, monster_id: int, **fields: Any) -> Any:
+        allowed = {
+            "name", "count", "ac", "max_hp", "speed", "cr", "size", "mtype",
+            "alignment", "str", "dex", "con", "intl", "wis", "cha",
+            "attack_bonus", "damage", "resistances", "immunities",
+            "condition_immunity", "hidden", "notes", "slot", "no_hp", "is_boss",
+        }
+        clean = {key: value for key, value in fields.items() if key in allowed}
+        if clean:
+            assignments = ", ".join(f"{key} = ?" for key in clean)
+            await self._write(
+                f"UPDATE encounter_monsters SET {assignments} WHERE id = ?",
+                list(clean.values()) + [monster_id],
+            )
+        return await self._get_encounter_monster(monster_id)
+
+    async def delete_encounter_monster(self, monster_id: int) -> None:
+        await self._write("DELETE FROM encounter_monsters WHERE id = ?", (monster_id,))
+
+    # -- encounter runs --------------------------------------------------
+    async def start_encounter_run(
+        self, encounter_id: int, campaign_id: int, started_by: int, session_id: int | None
+    ) -> Any:
+        monsters = await self.encounter_monsters(encounter_id)
+        run_id = await self._insert(
+            "INSERT INTO encounter_runs (encounter_id, campaign_id, session_id,"
+            " started_by, started_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
+            (encounter_id, campaign_id, session_id, started_by, time.time()),
+        )
+
+        order = 0
+        for monster in monsters:
+            # A count of 3 gives three independently-tracked units.
+            for copy in range(max(1, int(monster["count"] or 1))):
+                order += 1
+                label = (
+                    monster["name"] if int(monster["count"] or 1) <= 1
+                    else f"{monster['name']} #{copy + 1}"
+                )
+                await self._insert(
+                    "INSERT INTO encounter_units (run_id, monster_id, label, ac, hp,"
+                    " max_hp, attack_bonus, damage, hidden, no_hp, is_boss, status,"
+                    " sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'alive', ?)",
+                    (
+                        run_id,
+                        monster["id"],
+                        label,
+                        monster["ac"],
+                        monster["max_hp"],
+                        monster["max_hp"],
+                        monster["attack_bonus"],
+                        monster["damage"],
+                        monster["hidden"],
+                        monster["no_hp"],
+                        monster["is_boss"],
+                        order,
+                    ),
+                )
+        await self.touch_campaign(campaign_id)
+        return await self.get_run(run_id)
+
+    async def get_run(self, run_id: int) -> Any:
+        return await self._fetchone("SELECT * FROM encounter_runs WHERE id = ?", (run_id,))
+
+    async def active_run(self, campaign_id: int) -> Any:
+        return await self._fetchone(
+            "SELECT * FROM encounter_runs WHERE campaign_id = ? AND status = 'active'"
+            " ORDER BY started_at DESC LIMIT 1",
+            (campaign_id,),
+        )
+
+    async def end_run(self, run_id: int) -> None:
+        await self._write(
+            "UPDATE encounter_runs SET status = 'ended', ended_at = ? WHERE id = ?",
+            (time.time(), run_id),
+        )
+
+    async def recent_runs(self, campaign_id: int, limit: int = 8) -> list[Any]:
+        return await self._fetchall(
+            "SELECT r.*, e.name AS encounter_name, e.hp_mode FROM encounter_runs r"
+            " JOIN encounters e ON e.id = r.encounter_id"
+            " WHERE r.campaign_id = ? ORDER BY r.started_at DESC LIMIT ?",
+            (campaign_id, limit),
+        )
+
+    async def run_units(self, run_id: int) -> list[Any]:
+        return await self._fetchall(
+            "SELECT * FROM encounter_units WHERE run_id = ? ORDER BY sort_order",
+            (run_id,),
+        )
+
+    async def get_unit(self, unit_id: int) -> Any:
+        return await self._fetchone("SELECT * FROM encounter_units WHERE id = ?", (unit_id,))
+
+    async def find_unit(self, run_id: int, selector: str) -> Any:
+        """Find a unit by 1-based position, exact label, or name fragment."""
+        rows = await self.run_units(run_id)
+        alive = [row for row in rows if row["status"] == "alive"]
+        selector = selector.strip()
+        if selector.isdigit():
+            position = int(selector)
+            if 1 <= position <= len(alive):
+                return alive[position - 1]
+            if 1 <= position <= len(rows):
+                return rows[position - 1]
+            return None
+        needle = selector.lower()
+        for row in alive + [r for r in rows if r["status"] != "alive"]:
+            if row["label"].lower() == needle:
+                return row
+        for row in alive:
+            if needle in row["label"].lower():
+                return row
+        return None
+
+    async def damage_unit(
+        self, unit_id: int, amount: int, actor_id: int, detail: str = ""
+    ) -> Any:
+        """Apply damage to a unit, clamp at zero and mark it dead.
+
+        A ``no_hp`` unit has no hit points to remove: the damage is recorded
+        but it stays standing until the DM kills it. That models a monster
+        such as a wraith that only goes down on the DM's word.
+        """
+        unit = await self.get_unit(unit_id)
+        if unit is None:
+            raise LookupError("That combatant is not in this encounter.")
+
+        remaining = unit["hp"]
+        status = unit["status"]
+        if unit["no_hp"]:
+            remaining = unit["max_hp"]  # untouched; damage is logged only
+        else:
+            remaining = max(0, unit["hp"] - amount)
+            status = "dead" if remaining <= 0 else unit["status"]
+            await self._write(
+                "UPDATE encounter_units SET hp = ?, status = ? WHERE id = ?",
+                (remaining, status, unit_id),
+            )
+
+        await self._insert(
+            "INSERT INTO encounter_damage (run_id, unit_id, actor_id, amount, detail,"
+            " remaining, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (unit["run_id"], unit_id, actor_id, amount, detail, remaining, time.time()),
+        )
+        return await self.get_unit(unit_id)
+
+    async def kill_unit(self, unit_id: int, actor_id: int, detail: str = "killed by the DM") -> Any:
+        """Drop a combatant regardless of its hit points.
+
+        The only way to finish a ``no_hp`` unit.
+        """
+        unit = await self.get_unit(unit_id)
+        if unit is None:
+            raise LookupError("That combatant is not in this encounter.")
+        if unit["status"] == "dead":
+            return unit
+        await self._write(
+            "UPDATE encounter_units SET status = 'dead', hp = 0 WHERE id = ?", (unit_id,)
+        )
+        await self._insert(
+            "INSERT INTO encounter_damage (run_id, unit_id, actor_id, amount, detail,"
+            " remaining, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (unit["run_id"], unit_id, actor_id, 0, detail, 0, time.time()),
+        )
+        return await self.get_unit(unit_id)
+
+    async def heal_unit(self, unit_id: int, amount: int, actor_id: int, detail: str = "") -> Any:
+        unit = await self.get_unit(unit_id)
+        if unit is None:
+            raise LookupError("That combatant is not in this encounter.")
+        healed = min(unit["max_hp"], unit["hp"] + amount)
+        status = "alive" if healed > 0 else "dead"
+        await self._write(
+            "UPDATE encounter_units SET hp = ?, status = ? WHERE id = ?",
+            (healed, status, unit_id),
+        )
+        await self._insert(
+            "INSERT INTO encounter_damage (run_id, unit_id, actor_id, amount, detail,"
+            " remaining, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (unit["run_id"], unit_id, actor_id, -amount, detail or "healed", healed, time.time()),
+        )
+        return await self.get_unit(unit_id)
+
+    async def unit_damage(self, unit_id: int, limit: int = 40) -> list[Any]:
+        return await self._fetchall(
+            "SELECT * FROM encounter_damage WHERE unit_id = ? ORDER BY id DESC LIMIT ?",
+            (unit_id, limit),
+        )
+
+    async def unit_damage_totals(self, run_id: int) -> dict[int, int]:
+        """unit_id -> damage dealt, for a quick summary."""
+        rows = await self._fetchall(
+            "SELECT unit_id, SUM(amount) AS total FROM encounter_damage"
+            " WHERE run_id = ? GROUP BY unit_id",
+            (run_id,),
+        )
+        return {int(row["unit_id"]): int(row["total"] or 0) for row in rows}
+
+    async def set_unit_visibility(self, run_id: int, monster_id: int, hidden: bool) -> int:
+        """Hide or reveal every live unit spawned from one template monster.
+
+        Lets the DM reveal an ambush mid-fight with the same ``/ms N show``
+        they used while preparing it. Returns how many units changed.
+        """
+        cur = await self._write(
+            "UPDATE encounter_units SET hidden = ? WHERE run_id = ? AND monster_id = ?",
+            (int(hidden), run_id, monster_id),
+        )
+        return cur
+
+    async def set_monster_visibility(self, encounter_id: int, monster_id: int, hidden: bool) -> int:
+        cur = await self._write(
+            "UPDATE encounter_monsters SET hidden = ? WHERE encounter_id = ? AND id = ?",
+            (int(hidden), encounter_id, monster_id),
+        )
+        return cur
+
+    async def set_unit_no_hp(self, run_id: int, monster_id: int, value: int) -> int:
+        """Mirror the no-HP flag onto the live units of a running fight."""
+        return await self._write(
+            "UPDATE encounter_units SET no_hp = ? WHERE run_id = ? AND monster_id = ?",
+            (value, run_id, monster_id),
+        )
+
+    async def set_unit_boss(self, run_id: int, monster_id: int, value: int) -> int:
+        """Mirror the boss flag onto the live units of a running fight."""
+        return await self._write(
+            "UPDATE encounter_units SET is_boss = ? WHERE run_id = ? AND monster_id = ?",
+            (value, run_id, monster_id),
         )
 
 

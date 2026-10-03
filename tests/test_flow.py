@@ -200,6 +200,11 @@ async def drive(entries, client, user_id, text, expect_reply=True, label=None,
     """
     event = FakeEvent(client, user_id, text)
     label = label or f"/{text.split()[0]} ({user_id})"
+    # Mirror the bot's always-on sender tracking so names resolve in output
+    # such as the encounter damage log.
+    await db.upsert_user(
+        user_id, username=event.sender.username, first_name=event.sender.first_name
+    )
     handler = find_message_handler(entries, text)
     if handler is None:
         if expect_reply:
@@ -265,9 +270,9 @@ async def run(real, client, table) -> int:
     # -- tutorial --------------------------------------------------------
     await drive(table, client, PLAYER1, "/tutorial")
     for topic in ("setup", "join", "dice", "character", "srd", "groups", "start",
-                  "dm", "campaign", "nonsense", "999999999"):
+                  "encounters", "fight", "dm", "campaign", "nonsense", "999999999"):
         await drive(table, client, PLAYER1, f"/tutorial {topic}")
-    for page in range(8):  # includes out-of-range pages on purpose
+    for page in range(10):  # includes out-of-range pages on purpose
         await open_callback(client, real, f"tut:{page}", PLAYER1)
 
     # -- campaign creation ----------------------------------------------
@@ -355,6 +360,292 @@ async def run(real, client, table) -> int:
 
     if (await db.get_character(character["id"]))["level"] != 5:
         FAIL.append("level: expected level 5")
+
+    # -- encounters: hidden HP ------------------------------------------
+    await drive(table, client, DM, "/encounters")
+    await drive(table, client, DM, "/newencounter")
+    enc = await drive(table, client, DM, "/newencounter Ambush at the ford | hidden")
+    if "NOT" not in (enc.replies[0]["text"] if enc.replies else ""):
+        FAIL.append("encounter: 'hidden' keyword did not switch the HP mode")
+    stored = (await db.list_encounters(campaign_id))[0]
+    if stored["hp_mode"] != "hidden":
+        FAIL.append(f"encounter: expected hidden mode, got {stored['hp_mode']}")
+
+    await drive(table, client, PLAYER1, "/newencounter Sneaky one")  # not the DM
+    await drive(table, client, DM, "/addmonster goblin 3")
+    await drive(table, client, DM, "/addmonster ogre")
+    await drive(table, client, DM, "/addmonster ogre")
+    await drive(table, client, DM, "/addmonster adult-red-dragn")
+    await drive(table, client, DM, "/addmonster goblin x5")
+    await drive(table, client, DM, "/enc")
+    await drive(table, client, PLAYER1, "/enc")  # plans stay private
+
+    monsters = await db.encounter_monsters(stored["id"])
+    if len(monsters) != 5:
+        FAIL.append(f"encounter: expected 5 monster entries, got {len(monsters)}")
+
+    # tailoring
+    await drive(table, client, DM, "/ms")
+    await drive(table, client, DM, "/ms 1")
+    await drive(table, client, DM, "/ms 1 ac 16")
+    await drive(table, client, DM, "/ms 1 hp 20")
+    await drive(table, client, DM, "/ms 1 dmg 2d6+3")
+    await drive(table, client, DM, "/ms 1 atk +6")
+    await drive(table, client, DM, "/ms 1 count 4")
+    await drive(table, client, DM, "/ms 2 name Dire Ogre")
+    await drive(table, client, DM, "/ms 2 note breathes fire")
+    await drive(table, client, DM, "/ms 3 hide")
+    await drive(table, client, DM, "/ms 3 show")
+    await drive(table, client, DM, "/ms 9 ac 5")
+    await drive(table, client, DM, "/ms 1 hp")
+    await drive(table, client, DM, "/ms 1 nonsense 5")
+    await drive(table, client, DM, "/ms 1 dmg notdice")
+    await drive(table, client, DM, "/ms 1 ac 999")  # clamped
+    await drive(table, client, DM, "/hpmode")
+    await drive(table, client, DM, "/hpmode visible")
+    await drive(table, client, DM, "/hpmode hidden")
+    await drive(table, client, DM, "/hpmode sideways")
+
+    by_slot = {m["slot"]: m for m in await db.encounter_monsters(stored["id"])}
+    goblin = by_slot[1]
+    if goblin["name"] != "Goblin":
+        FAIL.append(f"encounter: slot 1 should be the goblin, got {goblin['name']}")
+    if (goblin["ac"], goblin["max_hp"], goblin["damage"], goblin["attack_bonus"],
+            goblin["count"]) != (40, 20, "2d6+3", 6, 4):
+        FAIL.append(f"encounter: tailoring not applied: ac={goblin['ac']} hp={goblin['max_hp']} "
+                    f"dmg={goblin['damage']} atk={goblin['attack_bonus']} count={goblin['count']}")
+    if by_slot[2]["name"] != "Dire Ogre" or by_slot[2]["notes"] != "breathes fire":
+        FAIL.append("encounter: rename/note not saved")
+
+    # invoke it
+    await drive(table, client, PLAYER1, "/fight")  # no fight yet
+    await drive(table, client, DM, "/fight Ambush at the ford")
+    run = await db.active_run(campaign_id)
+    if not run:
+        FAIL.append("encounter: /fight did not start a run")
+    else:
+        units = await db.run_units(run["id"])
+        # counts: 4 goblins + 2 ogres + 5 goblins + 1 dragon
+        if len(units) != 12:
+            FAIL.append(f"encounter: expected 12 units from counts, got {len(units)}")
+        # the tailored stats must carry into the live units
+        if units[0]["ac"] != 40 or units[0]["max_hp"] != 20:
+            FAIL.append(f"encounter: live unit did not inherit tailored stats "
+                        f"(ac={units[0]['ac']} hp={units[0]['max_hp']})")
+
+    # player view must not leak HP numbers
+    player_view = await drive(table, client, PLAYER1, "/fight")
+    text = player_view.replies[0]["text"] if player_view.replies else ""
+    if "/20" in text or "/7" in text:
+        FAIL.append(f"encounter: PLAYER VIEW LEAKED HP: {text[:200]}")
+    if "untouched" not in text.lower():
+        FAIL.append("encounter: hidden view before damage should say untouched")
+
+    # damage attributed to whoever dealt it
+    await drive(table, client, PLAYER1, "/hit 1 12")
+    await drive(table, client, DM, "/hit goblin 3")
+    await drive(table, client, PLAYER1, "/hit 4 2d6+3")
+    await drive(table, client, PLAYER1, "/hit 99 5")
+    await drive(table, client, PLAYER1, "/hit 1 notanumber")
+    await drive(table, client, PLAYER1, "/hit")
+    after = await drive(table, client, PLAYER1, "/fight")
+    after_text = after.replies[0]["text"] if after.replies else ""
+    if "P2002" not in after_text or "P1001" not in after_text:
+        FAIL.append(f"encounter: hidden view should credit each player: {after_text[:300]}")
+
+    # DM sees everything
+    dm_view = await drive(table, client, DM, "/fight")
+    dm_text = dm_view.replies[0]["text"] if dm_view.replies else ""
+    if "/20" not in dm_text:
+        FAIL.append(f"encounter: DM view should show HP: {dm_text[:250]}")
+    if "cannot see" not in dm_text.lower():
+        FAIL.append("encounter: DM view should note that players cannot see the numbers")
+
+    # kill everything, then end the fight
+    for _ in range(6):
+        await drive(table, client, DM, "/hit 1 99")
+    await drive(table, client, DM, "/hit 2 99")
+    await drive(table, client, DM, "/hit 3 99")
+    await drive(table, client, DM, "/hit 4 99")
+    await drive(table, client, DM, "/hit 5 99")
+    await drive(table, client, DM, "/endfight")
+    if await db.active_run(campaign_id):
+        FAIL.append("encounter: /endfight left a run active")
+    await drive(table, client, DM, "/endfight")  # nothing running
+    await drive(table, client, PLAYER1, "/hit 1 5")  # no fight
+
+    # visible mode shows HP to players
+    await drive(table, client, DM, "/newencounter Open brawl | visible")
+    await drive(table, client, DM, "/addmonster goblin 2")
+    await drive(table, client, DM, "/fight Open brawl")
+    visible = await drive(table, client, PLAYER1, "/fight")
+    vtext = visible.replies[0]["text"] if visible.replies else ""
+    if "/7" not in vtext:
+        FAIL.append(f"encounter: visible mode should show player HP: {vtext[:250]}")
+    await drive(table, client, DM, "/endfight")
+
+    await drive(table, client, DM, "/delenc Ambush at the ford")
+
+    # -- no-HP monsters, reveals and death alerts ------------------------
+    client.sent.clear()
+    await drive(table, client, DM, "/newencounter Haunted crypt | hidden")
+    await drive(table, client, DM, "/addmonster skeleton 2")
+    await drive(table, client, DM, "/addmonster wraith")
+    await drive(table, client, DM, "/ms 2 nohp")
+    await drive(table, client, DM, "/ms 2 hide")
+    await drive(table, client, DM, "/ms 2 hpback")
+    await drive(table, client, DM, "/ms 2 nohp")
+    nohp = (await db.encounter_monsters((await db.list_encounters(campaign_id))[0]["id"]))[1]
+    if not nohp["no_hp"]:
+        FAIL.append("encounter: /ms 2 nohp did not set the flag")
+    client.sent.clear()
+
+    start = await drive(table, client, DM, "/fight Haunted crypt")
+    rollout_text = "\n".join(r["text"] or "" for r in start.replies) + "\n".join(
+        m for _, m in client.sent
+    )
+    if "lurk" in rollout_text.lower() or "more" in rollout_text.lower():
+        FAIL.append(f"encounter: rollout advertises hidden monsters: {rollout_text[:250]}")
+    if "Wraith" in rollout_text:
+        FAIL.append("encounter: a hidden monster appeared in the party rollout")
+    client.sent.clear()
+
+    # a reveal mid-fight must be announced
+    await drive(table, client, DM, "/ms 2 show")
+    reveals = [m for _, m in client.sent if "reveals" in m.lower()]
+    if not reveals:
+        FAIL.append("encounter: /ms N show did not announce the reveal")
+    else:
+        check_html("reveal announce", reveals[0])
+    client.sent.clear()
+
+    # a normal monster at 0 HP alerts everyone (one message per member)
+    run_id = (await db.active_run(campaign_id))["id"]
+    first_skeleton = await db.find_unit(run_id, "Skeleton #1")
+    await drive(table, client, PLAYER1, "/hit skeleton 30")
+    death_msgs = {m for _, m in client.sent if "goes down" in m.lower()}
+    if len(death_msgs) != 1:
+        FAIL.append(f"encounter: expected 1 distinct death alert, got {len(death_msgs)}")
+    else:
+        check_html("death alert", death_msgs.pop())
+        if "Skeleton #1" not in _last_client_sent(client, "goes down"):
+            FAIL.append("encounter: death alert names the wrong unit")
+    recipients = {ent for ent, m in client.sent if "goes down" in m.lower()}
+    if len(recipients) < 2:
+        FAIL.append(f"encounter: death alert only reached {recipients}, expected the whole party")
+    skeleton = await db.get_unit(first_skeleton["id"])
+    if skeleton["status"] != "dead":
+        FAIL.append("encounter: skeleton should be dead")
+    # a positional selector skips the dead unit
+    survivor = await db.find_unit(run_id, "1")
+    if survivor["label"] != "Skeleton #2":
+        FAIL.append(f"encounter: selector should skip the dead, got {survivor['label']}")
+    client.sent.clear()
+
+    # a no-HP monster absorbs damage and stays up
+    await drive(table, client, PLAYER1, "/hit wraith 500")
+    wraith = await db.find_unit((await db.active_run(campaign_id))["id"], "wraith")
+    if wraith["status"] == "dead":
+        FAIL.append("encounter: a no-HP monster must not die from damage")
+    totals = await db.unit_damage_totals((await db.active_run(campaign_id))["id"])
+    if totals.get(wraith["id"], 0) != 500:
+        FAIL.append(f"encounter: no-HP damage not accumulated: {totals.get(wraith['id'])}")
+    if client.sent:
+        FAIL.append(f"encounter: no-HP monster wrongly announced a death: {client.sent}")
+
+    # the DM drops it with /kill, which does alert the party
+    await drive(table, client, DM, "/kill wraith")
+    wraith = await db.get_unit(wraith["id"])
+    if wraith["status"] != "dead":
+        FAIL.append("encounter: /kill did not drop the no-HP monster")
+    kills = [m for _, m in client.sent if "goes down" in m.lower()]
+    if not kills:
+        FAIL.append("encounter: /kill did not announce the death to the party")
+    else:
+        check_html("kill announce", kills[0])
+    await drive(table, client, DM, "/kill wraith")  # already dead
+    await drive(table, client, PLAYER1, "/kill wraith")  # not the DM
+    await drive(table, client, DM, "/kill")  # no selector
+    await drive(table, client, DM, "/kill nothing-here")
+    await drive(table, client, DM, "/endfight")
+
+    # -- boss crown, target numbers, fight-end announcement --------------
+    client.sent.clear()
+    await drive(table, client, DM, "/newencounter Dragon lair | visible")
+    await drive(table, client, DM, "/addmonster goblin 2")
+    await drive(table, client, DM, "/addmonster ogre")
+    await drive(table, client, DM, "/ms 2 boss")
+    dragons = await db.encounter_monsters((await db.list_encounters(campaign_id))[0]["id"])
+    if not dragons[1]["is_boss"] or dragons[0]["is_boss"]:
+        FAIL.append("encounter: /ms N boss set the wrong rows")
+
+    start = await drive(table, client, DM, "/fight Dragon lair")
+    start_text = "\n".join(r["text"] or "" for r in start.replies)
+    if "\U0001f451" not in start_text:
+        FAIL.append("encounter: boss crown missing from the party rollout")
+    if "3. " not in start_text or "1. " not in start_text:
+        FAIL.append(f"encounter: rollout is not numbered: {start_text[:220]}")
+
+    listed = await drive(table, client, PLAYER1, "/fight")
+    listed_text = listed.replies[0]["text"] if listed.replies else ""
+    # the crown must reach players, and numbers must be the usable ones
+    if "\U0001f451" not in listed_text:
+        FAIL.append("encounter: boss crown missing from the player view")
+    if listed_text.find("1. Goblin #1") < 0 or listed_text.find("3. Ogre") < 0:
+        FAIL.append(f"encounter: player view not numbered: {listed_text[:220]}")
+    elif listed_text.index("1. Goblin #1") > listed_text.index("3. Ogre"):
+        FAIL.append("encounter: combatants are not listed in target order")
+
+    # the number a player sees is the one /hit resolves to
+    await drive(table, client, PLAYER1, "/hit 2 20")
+    run_now = await db.active_run(campaign_id)
+    goblin2 = await db.find_unit(run_now["id"], "Goblin #2")
+    if goblin2["status"] != "dead":
+        FAIL.append("encounter: /hit 2 did not target the second goblin")
+    # ...and the survivors close up the numbering
+    after = await drive(table, client, PLAYER1, "/fight")
+    after_text = after.replies[0]["text"] if after.replies else ""
+    if "2. Ogre" not in after_text or "2. Goblin #1" in after_text:
+        FAIL.append(f"encounter: numbers did not close up: {after_text[:220]}")
+    renumbered = await db.find_unit(run_now["id"], "1")
+    if renumbered["label"] != "Goblin #1":
+        FAIL.append(f"encounter: /hit 1 should now be {renumbered['label']}")
+    await drive(table, client, PLAYER1, "/hit 3 5")  # out of range now
+
+    # promoting a boss mid-fight reaches the live units
+    await drive(table, client, DM, "/ms 1 boss")
+    promoted = await drive(table, client, PLAYER1, "/fight")
+    if promoted.replies[0]["text"].count("\U0001f451") < 3:
+        FAIL.append("encounter: mid-fight boss promotion not shown to players")
+
+    # the fight ending is announced to everyone who was playing
+    client.sent.clear()
+    await drive(table, client, DM, "/endfight")
+    ending = [m for _, m in client.sent if "fight is over" in m.lower()]
+    if not ending:
+        FAIL.append("encounter: /endfight did not announce the end to the party")
+    else:
+        check_html("fight over announce", ending[0])
+        # the DM ran the command and gets their own reply, so only players
+        # should have been messaged
+        if PLAYER1 not in {ent for ent, _ in client.sent}:
+            FAIL.append("encounter: end-of-fight notice did not reach the players")
+        if DM in {ent for ent, _ in client.sent}:
+            FAIL.append("encounter: end-of-fight notice should not double-notify the DM")
+
+    # hidden monsters cannot be probed by number
+    await drive(table, client, DM, "/newencounter Ambush | hidden")
+    await drive(table, client, DM, "/addmonster goblin")
+    await drive(table, client, DM, "/ms 1 hide")
+    await drive(table, client, DM, "/fight Ambush")
+    probe = await drive(table, client, PLAYER1, "/hit 1 5")
+    probe_text = probe.replies[0]["text"] if probe.replies else ""
+    if "Goblin" in probe_text:
+        FAIL.append(f"encounter: a player revealed a hidden monster by number: {probe_text}")
+    dm_probe = await drive(table, client, DM, "/hit 1 5")
+    if "Goblin" not in (dm_probe.replies[0]["text"] if dm_probe.replies else ""):
+        FAIL.append("encounter: the DM should still be able to hit a hidden monster")
+    await drive(table, client, DM, "/endfight")
 
     # -- sessions --------------------------------------------------------
     await drive(table, client, PLAYER1, "/startsession")  # not the DM
@@ -518,6 +809,14 @@ async def resolve_join(client, real, request_id, decision, dm_id):
     await callback(event)
     for edit in event.edits:
         check_html(f"join:{decision}", edit["text"] or "")
+
+
+def _last_client_sent(client, needle: str) -> str:
+    """Most recent outbound message containing `needle`."""
+    for _, message in reversed(client.sent):
+        if needle.lower() in message.lower():
+            return message
+    return ""
 
 
 def report() -> int:

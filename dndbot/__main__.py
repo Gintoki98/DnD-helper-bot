@@ -12,7 +12,7 @@ from telethon.errors import FloodWaitError, MessageNotModifiedError
 
 from . import config
 from .config import ConfigError
-from .handlers import campaign, character, core, dice, srd_lookup, tutorial
+from .handlers import campaign, character, core, dice, encounter, srd_lookup, tutorial
 from .logs import setup_logging
 from .srd import srd
 from .storage import db
@@ -102,6 +102,28 @@ def build_client() -> TelegramClient:
     # Telethon takes parse_mode as an attribute, not a constructor argument.
     # Every reply in this bot is authored as Telegram-flavoured HTML.
     client.parse_mode = "html"
+
+    @client.on(events.NewMessage(incoming=True))
+    async def _record_sender(event: events.NewMessage.Event) -> None:
+        """Keep the users table current so names are always resolvable.
+
+        Roster entries, DM announcements and the encounter damage log all show
+        a player's name, so a user must be stored the first time they say
+        anything - not only when they run /start.
+        """
+        sender = getattr(event, "sender", None)
+        if sender is None:
+            return
+        try:
+            await db.upsert_user(
+                sender.id,
+                username=getattr(sender, "username", None),
+                first_name=getattr(sender, "first_name", None),
+                last_name=getattr(sender, "last_name", None),
+            )
+        except Exception:
+            log.debug("could not record user %s", getattr(sender, "id", "?"), exc_info=True)
+
     return client
 
 
@@ -112,6 +134,7 @@ def register_handlers(client) -> None:
     character.register(client)
     srd_lookup.register(client)
     tutorial.register(client)
+    encounter.register(client)
 
 
 BOT_COMMANDS = [
@@ -124,6 +147,9 @@ BOT_COMMANDS = [
     "roster",
     # sessions
     "startsession", "endsession", "session", "checkin", "who", "announce",
+    # encounters
+    "encounters", "newencounter", "enc", "addmonster", "ms", "hpmode",
+    "fight", "hit", "heal", "kill", "endfight", "delenc",
     # characters
     "newchar", "char", "party", "switch", "hp", "sethp", "level", "xp", "set", "note",
     # SRD

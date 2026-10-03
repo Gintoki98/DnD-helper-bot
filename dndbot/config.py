@@ -44,6 +44,9 @@ API_ID: int | None = _int("API_ID")
 API_HASH: str = os.getenv("API_HASH", "").strip()
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID: int | None = _int("ADMIN_ID")
+# Default identity for MCP tools that act on behalf of a player. Optional: a
+# tool call may always pass an explicit user_id instead.
+MCP_USER_ID: int | None = _int("MCP_USER_ID")
 
 SRD_API_BASE: str = os.getenv("SRD_API_BASE", "https://www.dnd5eapi.co").rstrip("/")
 SRD_API_VERSION: str = os.getenv("SRD_API_VERSION", "2014").strip()
@@ -63,8 +66,15 @@ class ConfigError(RuntimeError):
     """Raised when required configuration is missing."""
 
 
-def check() -> None:
-    """Fail fast with a friendly message when credentials are absent."""
+def check(telegram: bool = True) -> None:
+    """Fail fast with a friendly message when credentials are absent.
+
+    ``telegram=False`` is the MCP server's path: it shares the database and
+    the SRD cache with the bot but signs into Telegram never, so the three
+    credentials below do not apply to it.
+    """
+    if not telegram:
+        return
     missing = []
     if not API_ID:
         missing.append("API_ID")

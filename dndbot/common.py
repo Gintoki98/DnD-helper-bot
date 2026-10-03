@@ -123,10 +123,6 @@ def duration(seconds: float) -> str:
     return f"{secs}s"
 
 
-def is_private(event: events.NewMessage | events.CallbackQuery.Event) -> bool:
-    return bool(getattr(event, "is_private", False))
-
-
 def is_callback(event) -> bool:
     """True for a CallbackQuery event (a button press).
 
@@ -134,6 +130,15 @@ def is_callback(event) -> bool:
     such attribute, so probing ``event.out`` there raises AttributeError.
     """
     return isinstance(event, events.CallbackQuery.Event) or hasattr(event, "data")
+
+
+def command_argument(event) -> str:
+    """The text after the command word, stripped; ``""`` when there is none.
+
+    ``/switch Sylra`` -> ``"Sylra"``, ``/switch`` -> ``""``.
+    """
+    parts = event.raw_text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 async def send_view(
@@ -159,19 +164,6 @@ async def send_view(
     )
 
 
-async def record_user(event) -> None:
-    """Keep the users table fresh for rosters and announcements."""
-    sender = await event.get_sender()
-    if sender is None:
-        return
-    await db.upsert_user(
-        sender.id,
-        username=getattr(sender, "username", None),
-        first_name=getattr(sender, "first_name", None),
-        last_name=getattr(sender, "last_name", None),
-    )
-
-
 class NoCampaign(Exception):
     """Raised when a command needs a campaign but none is selected."""
 
@@ -184,30 +176,28 @@ class NotTheDM(Exception):
     """Raised when a player-only command is used by a non-DM."""
 
 
-async def resolve_campaign(event, argument: str | None = None) -> Any:
-    """Work out which campaign a command refers to.
+async def resolve_campaign_for(
+    user_id: int, argument: str | None = None, chat_title: str | None = None
+) -> Any:
+    """Work out which campaign a user's command refers to.
 
-    Order: explicit argument -> the campaign being used in this chat -> the
+    Free of Telegram: ``chat_title`` is the title of the group the message
+    came from - None in a private chat, and always None for the MCP server.
+
+    Order: explicit argument -> the campaign named in the chat title -> the
     user's last selected campaign -> their only campaign.
     """
-    user_id = event.sender_id
-
     if argument:
         term = argument.strip()
-        row = await db.get_campaign_by_code(term)
-        if row is None:
-            matches = await db.find_campaigns(term)
-            row = matches[0] if matches else None
+        row = await db.lookup_campaign(term)
         if row is None:
             raise NoCampaign(f"I do not know a campaign called <code>{term}</code>.")
         await db.set_active_campaign(user_id, row["id"])
         return row
 
     # In a named group, prefer a campaign whose name appears in the title.
-    chat = getattr(event, "chat", None)
-    title = getattr(chat, "title", None) if chat is not None else None
-    if title:
-        lowered = title.lower()
+    if chat_title:
+        lowered = chat_title.lower()
         for row in await db.campaigns_for_user(user_id):
             if row["name"].lower() in lowered:
                 return row
@@ -234,6 +224,19 @@ async def resolve_campaign(event, argument: str | None = None) -> Any:
     )
 
 
+async def resolve_campaign(event, argument: str | None = None) -> Any:
+    """resolve_campaign_for() for a Telegram event.
+
+    The chat title is read only when the argument did not already settle it:
+    ``event.chat`` can cost an entity lookup on Telegram's side.
+    """
+    title = None
+    if not argument:
+        chat = getattr(event, "chat", None)
+        title = getattr(chat, "title", None) if chat is not None else None
+    return await resolve_campaign_for(event.sender_id, argument, title)
+
+
 async def ensure_member(campaign, user_id: int) -> Any:
     membership = await db.membership(campaign["id"], user_id)
     if membership is None:
@@ -248,6 +251,38 @@ async def ensure_dm(campaign, user_id: int) -> None:
     membership = await db.membership(campaign["id"], user_id)
     if membership is None or membership["role"] != "dm":
         raise NotTheDM("Only the DM can do that.")
+
+
+async def member_campaign(event, argument: str | None = None) -> Any:
+    """The campaign a member-only command acts on, or ``None`` after replying.
+
+    Resolves the campaign, enforces membership and answers the player itself,
+    so each command can start with one call and a guard clause.
+    """
+    try:
+        campaign = await resolve_campaign(event, argument)
+        await ensure_member(campaign, event.sender_id)
+    except (NoCampaign, NotAMember) as exc:
+        await event.reply(str(exc), parse_mode="html")
+        return None
+    return campaign
+
+
+async def dm_campaign(event, argument: str | None = None) -> Any:
+    """The campaign a DM-only command acts on, or ``None`` after replying.
+
+    Same contract as :func:`member_campaign`, but only the DM passes.
+    """
+    try:
+        campaign = await resolve_campaign(event, argument)
+        await ensure_dm(campaign, event.sender_id)
+    except NoCampaign as exc:
+        await event.reply(str(exc), parse_mode="html")
+        return None
+    except (NotAMember, NotTheDM) as exc:
+        await event.reply(str(exc))
+        return None
+    return campaign
 
 
 def is_admin(user_id: int | None) -> bool:

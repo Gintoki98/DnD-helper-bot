@@ -87,6 +87,12 @@ def page(lines: Iterable[str]) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def add_field(lines: list[str], label: str, value: Any) -> None:
+    """Append one ``<b>Label:</b> value`` line, skipping empty values."""
+    if value:
+        lines.append(f"<b>{label}:</b> {esc(value)}")
+
+
 def split_pages(text: str, size: int = PAGE_SIZE) -> list[str]:
     """Break a long page on paragraph boundaries, hard-splitting if needed."""
     if len(text) <= size:
@@ -188,9 +194,7 @@ def format_monster(entry, data: dict) -> list[str]:
         ("Damage Vulnerabilities", "damage_vulnerabilities"),
         ("Condition Immunities", "condition_immunities"),
     ):
-        text = names_of(data.get(key))
-        if text:
-            extras.append(f"<b>{label}:</b> {esc(text)}")
+        add_field(extras, label, names_of(data.get(key)))
     senses = data.get("senses")
     if senses:
         extras.append(f"<b>Senses:</b> {esc(clean(str(senses)))}")
@@ -230,6 +234,17 @@ def format_monster(entry, data: dict) -> list[str]:
 
 
 # -- spells ---------------------------------------------------------------
+def _spell_components(value: Any) -> str:
+    """``["V", {"name": "torch", "amount": 1}]`` rendered as ``"V, torch (1)"``."""
+    parts = []
+    for comp in value:
+        if isinstance(comp, dict):
+            amount = comp.get("amount")
+            label_text = comp.get("name") or str(comp.get("type", "")).title()
+            parts.append(f"{esc(label_text)} ({esc(amount)})" if amount else esc(label_text))
+    return ", ".join(parts)
+
+
 def format_spell(entry, data: dict) -> list[str]:
     level = data.get("level", entry.level)
     school = data.get("school", {})
@@ -254,15 +269,8 @@ def format_spell(entry, data: dict) -> list[str]:
     ):
         value = data.get(key)
         if key == "components" and value:
-            parts = []
-            for comp in value:
-                if isinstance(comp, dict):
-                    amount = comp.get("amount")
-                    label_text = comp.get("name") or str(comp.get("type", "")).title()
-                    parts.append(f"{esc(label_text)} ({esc(amount)})" if amount else esc(label_text))
-            value = ", ".join(parts)
-        if value:
-            lines.append(f"<b>{label}:</b> {esc(str(value))}")
+            value = _spell_components(value)
+        add_field(lines, label, value)
 
     lines.append("")
     lines.append(esc(desc_text(data.get("desc"))))
@@ -300,9 +308,7 @@ def format_item(entry, data: dict) -> list[str]:
         ("Cost", "cost"),
         ("Weight", "weight"),
     ):
-        value = data.get(key)
-        if value:
-            headline.append(f"<b>{label}:</b> {esc(value)}")
+        add_field(headline, label, data.get(key))
     if headline:
         lines += [esc(" \u2022 ".join(headline))]
     if data.get("requires_attunement"):
@@ -321,7 +327,7 @@ def format_item(entry, data: dict) -> list[str]:
 
 
 # -- rules ----------------------------------------------------------------
-def format_rule(entry, data: dict, depth: int = 0) -> list[str]:
+def format_rule(entry, data: dict) -> list[str]:
     lines = [f"<b>\u2696 {esc(data.get('name', entry.name))}</b>", ""]
     lines.append(esc(desc_text(data.get("desc"))))
     children = data.get("children") or []

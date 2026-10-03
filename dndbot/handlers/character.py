@@ -12,11 +12,24 @@ from .. import keyboards as kb
 from ..common import (
     NoCampaign,
     NotAMember,
+    command_argument,
     display_name,
     ensure_member,
+    member_campaign,
     resolve_campaign,
     safe,
 )
+from ..sheet import (
+    ABBREV,
+    SET_FIELD_COLUMNS,
+    apply_hp_delta,
+    hp_reply,
+    level_change_error,
+    level_up_gain,
+    party_block,
+    stat_block,
+)
+from ..services import character_for, switch_to
 from ..srd import SRDError, srd
 from ..storage import ability_modifier, db
 
@@ -27,65 +40,6 @@ DRAFT_TTL = 600
 # Test hook. Flipped by tests/test_flow.py to force a handler failure so the
 # error log and the guard's behaviour can be asserted.
 BROKEN = False
-
-ABBREV = {"str": "str", "s": "str", "dex": "dex", "d": "dex", "con": "con", "c": "con",
-          "int": "intl", "i": "intl", "wis": "wis", "w": "wis", "cha": "cha", "ch": "cha"}
-
-
-def stat_block(character, owner: Any = None, history: list | None = None) -> str:
-    """Render a character sheet as Telegram HTML."""
-    hp = character["hp"]
-    max_hp = character["max_hp"]
-    bar_len = 10
-    filled = 0 if max_hp <= 0 else round(bar_len * max(0, min(hp, max_hp)) / max_hp)
-    bar = "\U0001f49a" * filled + "\U0001f49b" * (bar_len - filled)
-    temp = f" (+{character['temp_hp']} temp)" if character["temp_hp"] else ""
-
-    subtitle = " \u2022 ".join(
-        part
-        for part in (safe(character["race"]), safe(character["class_name"]), safe(character["background"]))
-        if part
-    )
-
-    lines = [
-        f"<b>\U0001f9d9 {safe(character['name'])}</b>",
-        f"<i>{subtitle or ' adventurer'}</i>",
-        "",
-        f"<b>\u2764\ufe0f HP:</b> {bar} <code>{hp}/{max_hp}</code>{temp}",
-        f"<b>\U0001f6e1 AC:</b> {character['ac']}   "
-        f"<b>\u1f4a3 Initiative:</b> {character['initiative']:+d}   "
-        f"<b>\U0001f6b6 Speed:</b> {character['speed']} ft.",
-        f"<b>\u2b50 Level:</b> {character['level']}   "
-        f"<b>\U0001f4c8 XP:</b> {character['xp']:,}   "
-        f"<b>\U0001f4b0 Gold:</b> {character['gold']:,}",
-        "",
-        "<b>Ability scores</b>",
-    ]
-    scores = [
-        (label, character[key], ability_modifier(character[key]))
-        for key, label in (("str", "STR"), ("dex", "DEX"), ("con", "CON"),
-                           ("intl", "INT"), ("wis", "WIS"), ("cha", "CHA"))
-    ]
-    for start in (0, 3):
-        lines.append(
-            "  ".join(
-                f"{label} <code>{score}</code>({mod:+d})" for label, score, mod in scores[start : start + 3]
-            )
-        )
-    lines.append("")
-    if character["inspiration"]:
-        lines.append("\u2728 <i>Has inspiration</i>")
-    if character["subclass"]:
-        lines.append(f"<b>Path:</b> {safe(character['subclass'])}")
-    if owner is not None:
-        lines.append(f"<i>Played by {owner}</i>")
-    if character["notes"]:
-        lines += ["", f"<b>Notes</b>\n<i>{safe(character['notes'])}</i>"]
-    if history:
-        recent = "\n".join(f"• {e['kind']} {e['detail']}".rstrip() for e in history)
-        if recent:
-            lines += ["", f"<b>Recent</b>\n{recent}"]
-    return "\n".join(lines)
 
 
 async def _ask_class(event) -> None:
@@ -109,25 +63,161 @@ async def load_character(event, name: str = "") -> tuple[Any, Any]:
         raise RuntimeError("deliberate failure for the error-log test")
     campaign = await resolve_campaign(event)
     await ensure_member(campaign, event.sender_id)
+    return campaign, await character_for(event.sender_id, campaign, name)
 
-    if name:
-        matches = await db.find_character(campaign["id"], name)
-        if not matches:
-            raise LookupError(
-                f"No character called <b>{safe(name)}</b> in {safe(campaign['name'])}."
-            )
-        return campaign, matches[0]
 
-    character = await db.active_character(campaign["id"], event.sender_id)
-    if character is None:
-        mine = await db.list_characters(campaign["id"], event.sender_id)
-        if not mine:
-            raise LookupError(
-                "You have no character in this campaign yet.\n"
-                "Make one with <code>/newchar</code>."
-            )
-        return campaign, mine[0]
-    return campaign, character
+async def character_or_reply(event, name: str = "") -> Any:
+    """The character a command targets, or ``None`` after replying with the reason.
+
+    Wraps :func:`load_character` for commands: instead of every handler
+    repeating the same ``try``/``except`` and reply, they guard one value.
+    """
+    try:
+        _campaign, character = await load_character(event, name)
+    except (LookupError, NoCampaign, NotAMember) as exc:
+        await event.reply(str(exc), parse_mode="html")
+        return None
+    return character
+
+
+# -- guided creation steps ------------------------------------------------
+ABILITY_KEYS = ("str", "dex", "con", "intl", "wis", "cha")
+
+
+def _advance(draft: dict, step: str, loop) -> None:
+    """Move the wizard to its next question and restart the idle timer."""
+    draft["step"] = step
+    draft["at"] = loop.time()
+
+
+def _split_choice(answer: str) -> tuple[str, str]:
+    """Split ``"Half-elf / Urchin"`` into its two halves (either may be empty)."""
+    parts = answer.split("/", 1)
+    main = parts[0].strip()[:60]
+    extra = parts[1].strip()[:60] if len(parts) > 1 else ""
+    return main, extra
+
+
+async def _step_name(event, draft: dict, answer: str, loop) -> None:
+    """Question 1/6: the character's name."""
+    draft["data"]["name"] = answer[:60]
+    _advance(draft, "class", loop)
+    await _ask_class(event)
+
+
+async def _step_class(event, draft: dict, answer: str, loop) -> None:
+    """Question 2/6: class and optional subclass."""
+    draft["data"]["class_name"], draft["data"]["subclass"] = _split_choice(answer)
+    _advance(draft, "origin", loop)
+    hint = ""
+    try:
+        races = [r.name for r in await srd.index("races")]
+        subraces = [r.name for r in await srd.index("subraces")]
+        hint = f"\n\n<i>SRD races: {', '.join(races)}\nSubraces: {', '.join(subraces)}</i>"
+    except SRDError:
+        pass
+    await event.reply(
+        "<b>3/6</b> Race and background?\n"
+        "<i>e.g. \"Half-elf / Urchin\" or just \"Half-elf\"</i>" + hint,
+        parse_mode="html",
+    )
+
+
+async def _step_origin(event, draft: dict, answer: str, loop) -> None:
+    """Question 3/6: race and background."""
+    draft["data"]["race"], draft["data"]["background"] = _split_choice(answer)
+    _advance(draft, "level", loop)
+    await event.reply(
+        "<b>4/6</b> What level did you start at? (1-20)\n<i>e.g. <code>1</code></i>",
+        parse_mode="html",
+    )
+
+
+async def _step_level(event, draft: dict, answer: str, loop) -> None:
+    """Question 4/6: the starting level. Anything outside 1-20 is re-asked."""
+    level = re.search(r"\d+", answer)
+    if not level or not 1 <= int(level.group()) <= 20:
+        await event.reply("Give me a number from 1 to 20.", parse_mode="html")
+        return
+    draft["data"]["level"] = int(level.group())
+    _advance(draft, "abilities", loop)
+    await event.reply(
+        "<b>5/6</b> Your ability scores.\n\n"
+        "Send all six, space separated, in this order:\n"
+        "<code>STR DEX CON INT WIS CHA</code>\n\n"
+        "<i>e.g. <code>10 16 14 12 13 8</code>  \u2022  anything you leave out becomes 10</i>",
+        parse_mode="html",
+    )
+
+
+async def _step_abilities(event, draft: dict, answer: str, loop) -> None:
+    """Question 5/6: six scores in order, defaulting the missing ones to 10."""
+    numbers = [int(n) for n in re.findall(r"\d+", answer)][:6]
+    while len(numbers) < 6:
+        numbers.append(10)
+    if any(not 1 <= value <= 30 for value in numbers):
+        bad = [v for v in numbers if not 1 <= v <= 30][0]
+        await event.reply(
+            f"Scores must be between 1 and 30 - <code>{bad}</code> is not.",
+            parse_mode="html",
+        )
+        return
+    for key, value in zip(ABILITY_KEYS, numbers):
+        draft["data"][key] = value
+    _advance(draft, "defenses", loop)
+    await event.reply(
+        "<b>6/6</b> Last one: AC, max HP and speed.\n\n"
+        "<code>16 40 30</code>  \u2192  AC 16, max HP 40, speed 30 ft.\n"
+        "<i>Send <code>skip</code> for AC 10, HP 10, speed 30.</i>",
+        parse_mode="html",
+    )
+
+
+async def _step_defenses(event, draft: dict, answer: str, loop) -> None:
+    """Question 6/6: AC, hit points and speed - then create the character."""
+    if answer.lower() in {"skip", "none"}:
+        numbers = [10, 10, 30]
+    else:
+        numbers = [int(n) for n in re.findall(r"\d+", answer)]
+    ac = numbers[0] if len(numbers) > 0 else 10
+    max_hp = numbers[1] if len(numbers) > 1 else 10
+    speed = numbers[2] if len(numbers) > 2 else 30
+    max_hp = max(1, max_hp)
+    data = draft["data"]
+    data.update(
+        ac=ac,
+        max_hp=max_hp,
+        hp=max_hp,
+        speed=speed,
+        initiative=ability_modifier(data.get("dex", 10)),
+    )
+    DRAFT.pop(event.sender_id, None)
+
+    character = await db.create_character(
+        campaign_id=draft["campaign_id"],
+        user_id=event.sender_id,
+        **data,
+    )
+    await db.log_event(
+        character["id"], "created", f"level {character['level']}", event.sender_id
+    )
+    await db.touch_campaign(draft["campaign_id"])
+
+    await event.reply(
+        f"\U0001f389 <b>{safe(character['name'])}</b> is ready.\n\n" + stat_block(character),
+        buttons=kb.character_keyboard(character["id"], True),
+        parse_mode="html",
+    )
+
+
+CREATION_STEPS = {
+    "name": _step_name,
+    "class": _step_class,
+    "origin": _step_origin,
+    "level": _step_level,
+    "abilities": _step_abilities,
+    "defenses": _step_defenses,
+}
 
 
 def register(client) -> None:
@@ -136,18 +226,14 @@ def register(client) -> None:
     # ------------------------------------------------------------------
     @client.on(events.NewMessage(pattern=r"^/newchar(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def new_character(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        argument = parts[1].strip() if len(parts) > 1 else ""
+        argument = command_argument(event)
         forced = False
         if argument.lower().startswith("force"):
             forced = True
             argument = argument[5:].strip()
 
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event)
+        if campaign is None:
             return
 
         existing = await db.active_character(campaign["id"], event.sender_id)
@@ -177,15 +263,9 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/char(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def show_character(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        name = parts[1].strip() if len(parts) > 1 else ""
-        try:
-            campaign, character = await load_character(event, name)
-        except LookupError as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        name = command_argument(event)
+        character = await character_or_reply(event, name)
+        if character is None:
             return
 
         owner = character["user_id"] == event.sender_id
@@ -198,11 +278,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/party(?:@[\w_]+)?$"))
     async def party_sheet(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event)
+        if campaign is None:
             return
 
         party = await db.party(campaign["id"])
@@ -213,21 +290,7 @@ def register(client) -> None:
             )
             return
 
-        lines = [f"<b>\U0001f465 The party of {safe(campaign['name'])}</b>", ""]
-        for member in party:
-            down = member["hp"] <= 0
-            hp_text = f"{member['hp']}/{member['max_hp']}"
-            if member["temp_hp"]:
-                hp_text += f"+{member['temp_hp']}"
-            star = " \u2728" if member["inspiration"] else ""
-            state = " \U0001f480" if down else ""
-            lines.append(
-                f"• <b>{safe(member['name'])}</b> <i>{safe(member['class_name'])}</i> "
-                f"L{member['level']} \u2022 AC {member['ac']} \u2022 HP {hp_text}{star}{state}"
-            )
-        total = sum(p["hp"] for p in party)
-        lines += ["", f"<i>Party total HP: {total}</i>"]
-        await event.reply("\n".join(lines), parse_mode="html")
+        await event.reply(party_block(party, campaign["name"]), parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/hp(?:@[\w_]+)?\s+([+-]?\d+)(?:\s+(.*))?$"))
     async def change_hp(event: events.NewMessage.Event) -> None:
@@ -243,27 +306,13 @@ def register(client) -> None:
         delta = int(match.group(1))
         reason = (match.group(2) or "").strip()
 
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        character = await character_or_reply(event)
+        if character is None:
             return
 
-        new_hp = character["hp"] + delta
-        temp = character["temp_hp"]
-        wasted = 0
-        if new_hp < 0:
-            # Temporary hit points soak damage before real HP goes.
-            absorbed = min(temp, -new_hp)
-            temp -= absorbed
-            new_hp += absorbed
-            if new_hp < 0:
-                wasted = -new_hp  # damage beyond even 0 HP
-                new_hp = 0
-        elif new_hp > character["max_hp"]:
-            wasted = new_hp - character["max_hp"]
-            new_hp = character["max_hp"]
-        downed = new_hp <= 0
+        new_hp, temp, wasted = apply_hp_delta(
+            character["hp"], character["max_hp"], character["temp_hp"], delta
+        )
 
         await db.update_character(character["id"], hp=new_hp, temp_hp=temp)
         await db.log_event(
@@ -274,60 +323,32 @@ def register(client) -> None:
             event.sender_id,
         )
 
-        bar = ""
-        if character["max_hp"] > 0:
-            filled = round(10 * max(0, min(new_hp, character["max_hp"])) / character["max_hp"])
-            bar = "\U0001f49a" * filled + "\U0001f49b" * (10 - filled)
-
-        note = ""
-        if delta > 0 and new_hp == character["max_hp"] and wasted > 0:
-            note = f"\n<i>{wasted} point(s) of healing wasted - already at max HP.</i>"
-        elif wasted > 0:
-            note = f"\n<i>{wasted} point(s) of damage went past 0.</i>"
-        if downed:
-            note += "\n\n\U0001f480 <b>They are down.</b> Death saves: 1 success, 2 failures."
-
         await event.reply(
-            f"<b>{safe(character['name'])}</b> {delta:+d} HP \u2192 "
-            f"{bar} <code>{new_hp}/{character['max_hp']}</code>"
-            + (f" (+{temp} temp)" if temp else "")
-            + note,
+            hp_reply(character, delta, new_hp, temp, wasted),
             buttons=kb.character_keyboard(character["id"], True),
             parse_mode="html",
         )
 
     @client.on(events.NewMessage(pattern=r"^/(?:level|levelup)(?:@[\w_]+)?(?:\s+(\d+))?$"))
     async def change_level(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        target = int(parts[1]) if len(parts) > 1 and parts[1].strip().isdigit() else 0
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
-            return
-
-        new_level = target or character["level"] + 1
-        if not 1 <= new_level <= 20:
-            await event.reply("Levels run from 1 to 20 in the SRD.", parse_mode="html")
+        argument = command_argument(event)
+        target = int(argument) if argument.isdigit() else 0
+        character = await character_or_reply(event)
+        if character is None:
             return
 
         old_level = character["level"]
-        if new_level == old_level:
-            await event.reply(f"Already level {new_level}.", parse_mode="html")
-            return
-        if new_level < old_level:
-            await event.reply(
-                f"Going <i>down</i> a level needs the DM - set it yourself with "
-                f"<code>/set level {new_level}</code> if you must.",
-                parse_mode="html",
-            )
+        new_level = target or old_level + 1
+        refused = level_change_error(old_level, new_level)
+        if refused:
+            await event.reply(refused, parse_mode="html")
             return
 
         await db.update_character(character["id"], level=new_level)
         await db.log_event(
             character["id"], "level", f"{old_level} \u2192 {new_level}", event.sender_id
         )
-        gain = (new_level - old_level) * 5  # rough average, the player can set exact HP
+        gain = level_up_gain(old_level, new_level)
         await event.reply(
             f"\U0001f31f <b>{safe(character['name'])}</b> is now level <b>{new_level}</b>.\n"
             f"Average HP gain \u2248 {gain} - adjust it with <code>/sethp 38</code>.",
@@ -342,10 +363,8 @@ def register(client) -> None:
             await event.reply("Set current and max HP: <code>/sethp 38 52</code>", parse_mode="html")
             return
         hp, max_hp = int(match.group(1)), int(match.group(2) or match.group(1))
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        character = await character_or_reply(event)
+        if character is None:
             return
         await db.update_character(character["id"], hp=hp, max_hp=max_hp)
         await db.log_event(character["id"], "set HP", f"{hp}/{max_hp}", event.sender_id)
@@ -357,10 +376,8 @@ def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/xp(?:@[\w_]+)?\s+(\d+)$"))
     async def set_xp(event: events.NewMessage.Event) -> None:
         xp = int(re.search(r"(\d+)$", event.raw_text).group(1))
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        character = await character_or_reply(event)
+        if character is None:
             return
         await db.update_character(character["id"], xp=xp)
         await db.log_event(character["id"], "XP", f"set to {xp}", event.sender_id)
@@ -382,25 +399,17 @@ def register(client) -> None:
             )
             return
         field, value = match.group(1).lower(), int(match.group(2))
-        mapping = {
-            "ac": "ac", "armor": "ac", "armour": "ac",
-            "speed": "speed", "init": "initiative", "initiative": "initiative",
-            "gold": "gold", "level": "level", "temp": "temp_hp",
-            **ABBREV,
-        }
-        if field not in mapping:
+        if field not in SET_FIELD_COLUMNS:
             await event.reply(
                 f"I do not track <code>{field}</code>.\n"
                 "Try: ac, speed, init, gold, level, temp, str, dex, con, int, wis, cha.",
                 parse_mode="html",
             )
             return
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        character = await character_or_reply(event)
+        if character is None:
             return
-        column = mapping[field]
+        column = SET_FIELD_COLUMNS[field]
         await db.update_character(character["id"], **{column: value})
         await db.log_event(character["id"], field, f"set to {value}", event.sender_id)
         await event.reply(
@@ -412,54 +421,19 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/switch(?:@[\w_]+)?(?:\s+(.*))?$"))
     async def switch_character(event: events.NewMessage.Event) -> None:
-        try:
-            campaign = await resolve_campaign(event)
-            await ensure_member(campaign, event.sender_id)
-        except (NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        campaign = await member_campaign(event)
+        if campaign is None:
             return
-        mine = await db.list_characters(campaign["id"], event.sender_id)
-        if not mine:
-            await event.reply("You have no characters here. Try <code>/newchar</code>.", parse_mode="html")
-            return
-        if len(mine) == 1:
-            await event.reply(f"You only have one: <b>{safe(mine[0]['name'])}</b>.", parse_mode="html")
-            return
-
-        parts = event.raw_text.split(None, 1)
-        term = parts[1].strip() if len(parts) > 1 else ""
-        if not term:
-            lines = ["<b>Your characters</b>", ""]
-            for character in mine:
-                active = " \u2705" if character["is_active"] else ""
-                lines.append(
-                    f"• <b>{safe(character['name'])}</b> <i>{safe(character['class_name'])}</i> "
-                    f"L{character['level']} {character['hp']}/{character['max_hp']} HP{active}"
-                )
-            await event.reply(
-                "\n".join(lines) + "\n\n<i>Send /switch Name to change.</i>", parse_mode="html"
-            )
-            return
-
-        matches = await db.find_character(campaign["id"], term)
-        owned = [c for c in matches if c["user_id"] == event.sender_id]
-        if not owned:
-            await event.reply(f"You have no character called <b>{term}</b>.", parse_mode="html")
-            return
-        await db.set_active_character(owned[0]["id"])
-        await event.reply(
-            f"\u2705 <b>{safe(owned[0]['name'])}</b> is now your active character.",
-            parse_mode="html",
+        _character, message = await switch_to(
+            event.sender_id, campaign, command_argument(event)
         )
+        await event.reply(message, parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/note(?:@[\w_]+)?\s+(.*)$"))
     async def set_note(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        note = parts[1].strip() if len(parts) > 1 else ""
-        try:
-            campaign, character = await load_character(event)
-        except (LookupError, NoCampaign, NotAMember) as exc:
-            await event.reply(str(exc), parse_mode="html")
+        note = command_argument(event)
+        character = await character_or_reply(event)
+        if character is None:
             return
         await db.update_character(character["id"], notes=note)
         await event.reply(
@@ -489,121 +463,10 @@ def register(client) -> None:
             return
 
         step = draft["step"]
-        data = draft["data"]
-
-        if step == "name":
-            data["name"] = answer[:60]
-            draft["step"] = "class"
-            draft["at"] = loop.time()
-            await _ask_class(event)
+        handler = CREATION_STEPS.get(step)
+        if handler is None:
             return
-
-        if step == "class":
-            parts = answer.split("/", 1)
-            data["class_name"] = parts[0].strip()[:60]
-            data["subclass"] = parts[1].strip()[:60] if len(parts) > 1 else ""
-            draft["step"] = "origin"
-            draft["at"] = loop.time()
-            hint = ""
-            try:
-                races = [r.name for r in await srd.index("races")]
-                subraces = [r.name for r in await srd.index("subraces")]
-                hint = f"\n\n<i>SRD races: {', '.join(races)}\nSubraces: {', '.join(subraces)}</i>"
-            except SRDError:
-                pass
-            await event.reply(
-                "<b>3/6</b> Race and background?\n"
-                "<i>e.g. \"Half-elf / Urchin\" or just \"Half-elf\"</i>" + hint,
-                parse_mode="html",
-            )
-            return
-
-        if step == "origin":
-            parts = answer.split("/", 1)
-            data["race"] = parts[0].strip()[:60]
-            data["background"] = parts[1].strip()[:60] if len(parts) > 1 else ""
-            draft["step"] = "level"
-            draft["at"] = loop.time()
-            await event.reply(
-                "<b>4/6</b> What level did you start at? (1-20)\n<i>e.g. <code>1</code></i>",
-                parse_mode="html",
-            )
-            return
-
-        if step == "level":
-            level = re.search(r"\d+", answer)
-            if not level or not 1 <= int(level.group()) <= 20:
-                await event.reply("Give me a number from 1 to 20.", parse_mode="html")
-                return
-            data["level"] = int(level.group())
-            draft["step"] = "abilities"
-            draft["at"] = loop.time()
-            await event.reply(
-                "<b>5/6</b> Your ability scores.\n\n"
-                "Send all six, space separated, in this order:\n"
-                "<code>STR DEX CON INT WIS CHA</code>\n\n"
-                "<i>e.g. <code>10 16 14 12 13 8</code>  \u2022  anything you leave out becomes 10</i>",
-                parse_mode="html",
-            )
-            return
-
-        if step == "abilities":
-            numbers = [int(n) for n in re.findall(r"\d+", answer)][:6]
-            while len(numbers) < 6:
-                numbers.append(10)
-            if any(not 1 <= value <= 30 for value in numbers):
-                bad = [v for v in numbers if not 1 <= v <= 30][0]
-                await event.reply(
-                    f"Scores must be between 1 and 30 - <code>{bad}</code> is not.",
-                    parse_mode="html",
-                )
-                return
-            for key, value in zip(("str", "dex", "con", "intl", "wis", "cha"), numbers):
-                data[key] = value
-            draft["step"] = "defenses"
-            draft["at"] = loop.time()
-            await event.reply(
-                "<b>6/6</b> Last one: AC, max HP and speed.\n\n"
-                "<code>16 40 30</code>  \u2192  AC 16, max HP 40, speed 30 ft.\n"
-                "<i>Send <code>skip</code> for AC 10, HP 10, speed 30.</i>",
-                parse_mode="html",
-            )
-            return
-
-        if step == "defenses":
-            if answer.lower() in {"skip", "none"}:
-                numbers = [10, 10, 30]
-            else:
-                numbers = [int(n) for n in re.findall(r"\d+", answer)]
-            ac = numbers[0] if len(numbers) > 0 else 10
-            max_hp = numbers[1] if len(numbers) > 1 else 10
-            speed = numbers[2] if len(numbers) > 2 else 30
-            max_hp = max(1, max_hp)
-            data.update(
-                ac=ac,
-                max_hp=max_hp,
-                hp=max_hp,
-                speed=speed,
-                initiative=ability_modifier(data.get("dex", 10)),
-            )
-            DRAFT.pop(event.sender_id, None)
-
-            character = await db.create_character(
-                campaign_id=draft["campaign_id"],
-                user_id=event.sender_id,
-                **data,
-            )
-            await db.log_event(
-                character["id"], "created", f"level {character['level']}", event.sender_id
-            )
-            await db.touch_campaign(draft["campaign_id"])
-
-            await event.reply(
-                f"\U0001f389 <b>{safe(character['name'])}</b> is ready.\n\n" + stat_block(character),
-                buttons=kb.character_keyboard(character["id"], True),
-                parse_mode="html",
-            )
-            return
+        await handler(event, draft, answer, loop)
 
     # ------------------------------------------------------------------
     # callbacks
@@ -615,7 +478,7 @@ def register(client) -> None:
 
         if action == "open":
             try:
-                campaign, character = await load_character(event)
+                _campaign, character = await load_character(event)
             except (LookupError, NoCampaign, NotAMember) as exc:
                 await event.answer(str(exc)[:200], alert=True)
                 return

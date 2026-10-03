@@ -5,91 +5,11 @@ from __future__ import annotations
 from telethon import Button, events
 
 from .. import keyboards as kb
-from ..common import display_name, is_admin, safe
+from ..common import command_argument, display_name, is_admin, safe
 from ..formatting import esc as escape
+from ..help import HELP_PAGES, WELCOME
+from ..logs import errors_path, recent_errors
 from ..storage import db
-
-HELP_DICE = (
-    "<b>\U0001f3b2 Dice</b>\n"
-    "<code>/roll 2d6+3</code> \u2014 any notation\n"
-    "<code>/roll 4d6kh3</code> \u2014 roll four, keep the best three\n"
-    "<code>/adv</code> / <code>/dis</code> \u2014 advantage roll (add your own modifier)\n"
-    "<code>/init</code> \u2014 initiative for the whole party\n"
-    "<i>Also: 2d20kl1 (keep lowest), 4d6r&lt;=1 (reroll ones), 2d6!&gt;=6 (exploding).</i>"
-)
-
-HELP_CAMPAIGN = (
-    "<b>\U0001f3dd Campaigns</b>\n"
-    "<code>/newcampaign Name | blurb</code> \u2014 become the DM\n"
-    "<code>/join ABC123</code> \u2014 ask to join (the DM approves)\n"
-    "<code>/campaigns</code> \u2014 everything you are in\n"
-    "<code>/select</code> \u2014 switch your active campaign\n"
-    "<code>/roster</code> \u2014 who is in the party\n"
-    "<code>/leave</code> \u2014 walk away"
-)
-
-HELP_SESSION = (
-    "<b>\U0001f5c3\ufe0f Sessions</b>\n"
-    "<code>/startsession</code> \u2014 DM only\n"
-    "<code>/checkin</code> \u2014 sit at the table\n"
-    "<code>/who</code> \u2014 who is here\n"
-    "<code>/endsession [notes]</code> \u2014 DM only, records the length"
-)
-
-HELP_CHARACTER = (
-    "<b>\U0001f9d9 Characters</b>\n"
-    "<code>/newchar</code> \u2014 guided creation, six questions\n"
-    "<code>/char</code> \u2014 your sheet (or <code>/char Name</code>)\n"
-    "<code>/hp -7</code> / <code>/hp +3</code> \u2014 damage and healing\n"
-    "<code>/sethp 38</code> / <code>/sethp 38 52</code> \u2014 set current / max\n"
-    "<code>/levelup</code> / <code>/level 5</code> \u2014 levels\n"
-    "<code>/xp 1250</code> \u2014 experience\n"
-    "<code>/set ac 16</code> \u2014 or speed, init, gold, str\u2026cha\n"
-    "<code>/note text</code> \u2014 sticky note on the sheet\n"
-    "<code>/party</code> \u2014 the whole party's vitals\n"
-    "<code>/switch Name</code> \u2014 change active character"
-)
-
-HELP_SRD = (
-    "<b>\U0001f5c2\ufe0f SRD lookup</b>\n"
-    "<code>/monster goblin</code> \u2014 full stat block\n"
-    "<code>/spell fireball</code> \u2014 casting, damage, classes\n"
-    "<code>/item adamantine armor</code> \u2014 magic items\n"
-    "<code>/equipment longsword</code> \u2014 mundane gear\n"
-    "<code>/rule long rest</code> \u2014 rules reference\n"
-    "<code>/class wizard</code> \u2022 <code>/race elf</code> \u2022 <code>/condition blinded</code>\n"
-    "<code>/search anything</code> \u2014 search everything at once\n"
-    "<code>/randmonster 2</code> \u2014 random monster by CR (or <code>/randmonster 1/4</code>)\n"
-    "<code>/randspell</code> \u2014 random spell\n"
-    "<i>Fuzzy matching: <code>/monster ancient red drgn</code> finds the red dragon.</i>"
-)
-
-HELP_ENCOUNTERS = (
-    "<b>\U0001f91d Encounters (DM only)</b>\n"
-    "<code>/newencounter Name | hidden</code> \u2014 prepare a fight\n"
-    "<code>/addmonster goblin 3</code> \u2014 pull monsters from the SRD\n"
-    "<code>/ms 1 ac 16</code> \u2014 tailor stats (also hp, dmg, atk, count, hide)\n"
-    "<code>/encounters</code> \u2022 <code>/enc Name</code> \u2022 "
-    "<code>/hpmode hidden</code>\n"
-    "\n"
-    "<b>In session</b>\n"
-    "<code>/fight Name</code> \u2014 the DM starts it, everyone is notified\n"
-    "<code>/hit 1 2d6+3</code> \u2014 damage (rolls dice, remembers who did it)\n"
-    "<code>/kill 2</code> \u2014 DM only, drops a combatant outright\n"
-    "<code>/heal 1 10</code> \u2022 <code>/fight</code> \u2022 <code>/endfight</code>\n"
-    "<i>With <b>hidden</b> HP, players see the damage they dealt but never the "
-    "monster's numbers. <code>/ms N hide</code> keeps one out of the list entirely; "
-    "<code>/ms N nohp</code> makes one fall only to /kill. Deaths and reveals are "
-    "announced to the party.</i>"
-)
-
-WELCOME = (
-    "\U0001f3df\ufe0f <b>D&amp;D Helper</b>\n\n"
-    "Dice, campaign sessions, character sheets and the whole SRD at your table.\n\n"
-    "Start here: <code>/newcampaign Your Campaign</code> and share the invite code, "
-    "or tap a button below.\n\n"
-    "<i>New? Send /tutorial for a guided walkthrough.</i>"
-)
 
 
 def register(client) -> None:
@@ -116,20 +36,8 @@ def register(client) -> None:
 
     @client.on(events.NewMessage(pattern=r"^/help(?:@[\w_]+)?(?:\s+(\w+))?$"))
     async def help_command(event: events.NewMessage.Event) -> None:
-        parts = event.raw_text.split(None, 1)
-        topic = parts[1].strip().lower() if len(parts) > 1 else ""
-        pages = {
-            "dice": HELP_DICE,
-            "campaign": HELP_CAMPAIGN,
-            "campaigns": HELP_CAMPAIGN,
-            "session": HELP_SESSION,
-            "sessions": HELP_SESSION,
-            "char": HELP_CHARACTER,
-            "character": HELP_CHARACTER,
-            "characters": HELP_CHARACTER,
-            "srd": HELP_SRD,
-            "encounter": HELP_ENCOUNTERS, "encounters": HELP_ENCOUNTERS,
-        }
+        topic = command_argument(event).lower()
+        pages = HELP_PAGES
         if topic and topic in pages:
             await event.reply(f"{pages[topic]}\n\n<i>/help for everything</i>", parse_mode="html")
             return
@@ -180,8 +88,6 @@ def register(client) -> None:
     @client.on(events.NewMessage(pattern=r"^/errors(?:@[\w_]+)?$"))
     async def errors_command(event: events.NewMessage.Event) -> None:
         """Show the tail of the error log. Anyone may read it."""
-        from ..logs import errors_path, recent_errors
-
         entries = recent_errors(max_entries=8)
         path = errors_path()
         if not entries:
@@ -236,15 +142,7 @@ def register(client) -> None:
             await event.answer()
             return
         if target == "help":
-            page = {
-                "dice": HELP_DICE,
-                "campaign": HELP_CAMPAIGN,
-                "session": HELP_SESSION,
-                "character": HELP_CHARACTER,
-                "srd": HELP_SRD,
-                "encounter": HELP_ENCOUNTERS,
-                "encounters": HELP_ENCOUNTERS,
-            }.get(rest[0] if rest else "", HELP_DICE)
+            page = HELP_PAGES.get(rest[0] if rest else "", HELP_PAGES["dice"])
             await event.edit(page, buttons=kb.main_menu(), parse_mode="html")
             await event.answer()
             return

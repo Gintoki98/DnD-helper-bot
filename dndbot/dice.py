@@ -17,10 +17,10 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass, field
+from typing import Any, Iterable
 
 MAX_DICE_PER_TERM = 100
 MAX_TOTAL_DICE = 200
-MAX_EXPLOSION_DEPTH = 10
 MAX_REROLLS = 20
 # Hard ceiling on individual die rolls, so a pathological expression
 # (explosions plus rerolls) cannot spin forever.
@@ -211,6 +211,19 @@ def _roll_die(sides: int) -> int:
     return random.randint(1, sides)
 
 
+def _apply_keep(term: Term) -> None:
+    """Drop every die beyond ``keep_n``, best (kh) or worst (kl) first."""
+    if not term.keep or len(term.dice) <= term.keep_n:
+        return
+    ordered = sorted(
+        range(len(term.dice)),
+        key=lambda i: term.dice[i].value,
+        reverse=term.keep == "kh",
+    )
+    for i in ordered[term.keep_n :]:
+        term.dice[i].kept = False
+
+
 def _roll_term(term: Term) -> None:
     """Roll one term, applying rerolls and explosions before keep/drop."""
     dice: list[Die] = []
@@ -245,15 +258,7 @@ def _roll_term(term: Term) -> None:
                 queue.append((1, note))
 
     term.dice = dice
-
-    if term.keep and len(term.dice) > term.keep_n:
-        ordered = sorted(
-            range(len(term.dice)),
-            key=lambda i: term.dice[i].value,
-            reverse=term.keep == "kh",
-        )
-        for i in ordered[term.keep_n :]:
-            term.dice[i].kept = False
+    _apply_keep(term)
 
 
 def roll(expression: str) -> RollResult:
@@ -262,5 +267,19 @@ def roll(expression: str) -> RollResult:
     for term in result.terms:
         _roll_term(term)
     return result
+
+
+def initiative_order(party: Iterable[Any], bonus: int = 0) -> list[tuple[int, Any]]:
+    """Roll initiative for a party: ``(total, member)`` pairs, highest first.
+
+    A d20 plus the member's own initiative modifier plus ``bonus``, sorted
+    descending. Ties keep the order the party came in.
+    """
+    scores = [
+        (roll(f"d20+{bonus + member['initiative']}").total, member)
+        for member in party
+    ]
+    scores.sort(key=lambda pair: pair[0], reverse=True)
+    return scores
 
 

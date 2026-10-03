@@ -264,7 +264,8 @@ async def run(real, client, table) -> int:
     # -- basics ---------------------------------------------------------
     await drive(table, client, DM, "/start")
     await drive(table, client, DM, "/help")
-    for topic in ("dice", "campaign", "session", "character", "srd", "nonsense"):
+    for topic in ("dice", "campaign", "session", "character", "srd", "encounter",
+                  "nonsense"):
         await drive(table, client, DM, f"/help {topic}")
 
     # -- tutorial --------------------------------------------------------

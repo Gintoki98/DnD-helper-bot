@@ -63,9 +63,9 @@ def dice_keyboard(expression: str = "", page: int = 0) -> list:
     expression = expression or ""
     rows.append(
         [
-            Button.inline("d20 adv", "dice:adv"),
-            Button.inline("d20 dis", "dice:dis"),
-            Button.inline("4d6kh3", "dice:kh3"),
+            Button.inline("\u2b06\ufe0f d20 adv", "dice:adv"),
+            Button.inline("\u2b07\ufe0f d20 dis", "dice:dis"),
+            Button.inline("\U0001f3b2 4d6kh3", "dice:kh3"),
         ]
     )
     rows.append(
@@ -73,7 +73,7 @@ def dice_keyboard(expression: str = "", page: int = 0) -> list:
             Button.inline("+", "dice:op:+"),
             Button.inline("\u2212", "dice:op:-"),
             Button.inline("\u00d7", "dice:op:*"),
-            Button.inline("clr", "dice:clr"),
+            Button.inline("\U0001f5d1\ufe0f clr", "dice:clr"),
         ]
     )
     rows.append(
@@ -117,7 +117,7 @@ def srd_menu() -> list:
             line = []
     if line:
         rows.append(line)
-    rows.append([Button.inline("\u2190 Menu", "menu:home")])
+    rows.append([Button.inline("\U0001f3e0 Menu", "menu:home")])
     return rows
 
 
@@ -170,7 +170,7 @@ def campaign_keyboard(campaign_id: int, is_dm: bool, has_session: bool) -> list:
                     "\u23f8 End session" if has_session else "\u25b6 Start session",
                     f"camp:{'end' if has_session else 'start'}:{campaign_id}",
                 ),
-                Button.inline("\U0001f6e1 Pending", f"camp:pending:{campaign_id}"),
+                Button.inline("\u23f3 Pending", f"camp:pending:{campaign_id}"),
             ]
         )
     rows.append([Button.inline("\U0001f517 Invite", f"camp:invite:{campaign_id}")])
@@ -184,7 +184,7 @@ def campaigns_list_keyboard(rows_db: Sequence[Any]) -> list:
     ]
     if buttons:
         buttons.append([Button.inline("\u2795 New campaign", "camp:new")])
-    buttons.append([Button.inline("\u2190 Menu", "menu:home")])
+    buttons.append([Button.inline("\U0001f3e0 Menu", "menu:home")])
     return buttons
 
 
@@ -213,7 +213,7 @@ def character_keyboard(character_id: int, is_owner: bool) -> list:
             Button.inline("\U0001f9d9\ufe0f Sheet", f"char:view:{character_id}"),
         ],
     ]
-    rows.append([Button.inline("\u2190 Menu", "menu:home")])
+    rows.append([Button.inline("\U0001f3e0 Menu", "menu:home")])
     return rows
 
 
@@ -225,8 +225,8 @@ def quick_roll_keyboard(expression: str) -> list:
             Button.inline("\u2795 +1", f"dice:go:({expression[:28]})+1"),
         ],
         [
-            Button.inline("Monster", "dice:encounter"),
-            Button.inline("\u2190 Menu", "menu:home"),
+            Button.inline("\U0001f409 Monster", "dice:encounter"),
+            Button.inline("\U0001f3e0 Menu", "menu:home"),
         ],
     ]
 

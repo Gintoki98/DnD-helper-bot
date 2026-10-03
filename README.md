@@ -32,6 +32,7 @@ API_ID=21742289
 API_HASH=your_api_hash
 BOT_TOKEN=1234567890:AAYourTokenFromBotFather
 ADMIN_ID=123456789          # optional, from @userinfobot
+MCP_USER_ID=123456789       # optional, default identity for the MCP server
 ```
 
 `.env` holds secrets — keep it out of version control (it is already in
@@ -166,20 +167,102 @@ damage types and alignments.
 `/help srd` for one area. `/whoami` shows your id and your characters.
 Type `/` in the chat for the full menu.
 
+## MCP server
+
+The same brain over the [Model Context Protocol](https://modelcontextprotocol.io),
+for AI clients: **34 tools** that read and write the same database and the
+same SRD cache as the bot, over **stdio**. Nothing here talks to Telegram, so
+nothing is broadcast — a session you open from a tool does not ping the
+players; they see it when they ask. Results are Markdown, and any domain
+mistake (no campaign, not the DM, a level that would go down) comes back as a
+readable error the model can correct and retry.
+
+```bash
+.venv/bin/python mcp_server.py     # stdio transport; config errors go to stderr
+```
+
+`MCP_USER_ID` in `.env` is the identity every tool acts for when a call omits
+`user_id`; without it, each tool needs an explicit id (`whoami` explains how
+to find one). Client configuration:
+
+```json
+{
+  "mcp": {
+    "dndbot": {
+      "type": "local",
+      "command": [
+        "/home/you/DnD-helper-bot/.venv/bin/python",
+        "/home/you/DnD-helper-bot/mcp_server.py"
+      ]
+    }
+  }
+}
+```
+
+Each tool's description states its Telegram syntax, so the two surfaces stay
+one vocabulary:
+
+| Tool | Telegram |
+| --- | --- |
+| **Dice** | |
+| `roll` | `/roll 2d6+3`, `/roll adv`, `/adv:+5` |
+| `party_initiative` | `/init [bonus]` |
+| **SRD** | |
+| `srd_lookup` | `/monster`, `/spell`, `/item`, `/rule`, … |
+| `srd_search` | `/search fireball` |
+| `srd_random` | `/randmonster [cr]`, `/randspell` |
+| `srd_list` | the SRD menu (`/start` → SRD) |
+| **Identity and meta** | |
+| `whoami` | `/whoami` (also resolves names to ids) |
+| `get_help` | `/help [dice|campaign|session|character|srd]` |
+| `get_tutorial` | `/tutorial [start|setup|join|…]` |
+| `recent_errors` | `/errors` (admin only, as `ADMIN_ID`) |
+| **Characters** | |
+| `create_character` | the six-step `/newchar` wizard in one call (`force` = `/newchar force`) |
+| `get_character` | `/char [name]` |
+| `list_party` | `/party` |
+| `change_hp` | `/hp -7 [reason]` |
+| `set_hp` | `/sethp 38 52` |
+| `level_up` | `/levelup`, `/level 5` |
+| `set_xp` | `/xp 3200` |
+| `set_character_field` | `/set ac 16` |
+| `add_note` | `/note <text>` |
+| `switch_character` | `/switch [Name]` |
+| **Campaigns** | |
+| `list_campaigns` | `/campaigns` |
+| `create_campaign` | `/newcampaign Name \| Blurb` |
+| `join_campaign` | `/join ABC123` |
+| `list_join_requests` | `/pending` |
+| `resolve_join` | the Approve/Deny buttons on `/pending` |
+| `select_campaign` | `/select [Name]` |
+| `get_roster` | `/roster` |
+| `campaign_info` | `/campaign` |
+| `leave_campaign` | `/leave` |
+| **Sessions** | |
+| `start_session` | `/startsession [title]` |
+| `end_session` | `/endsession [notes]` |
+| `session_history` | `/session` |
+| `checkin` | `/checkin` |
+| `who_is_here` | `/who` |
+
 ## Layout
 
 ```
-bot.py                  entry point
+bot.py                  entry point (Telegram)
+mcp_server.py           entry point (MCP, stdio)
 dndbot/
   __main__.py           client setup, token login, handler registration, guards
   config.py             .env loading and validation
   logs.py               rotating file logging, reading recent errors
   storage.py            SQLite schema and queries (aiosqlite)
   dice.py               dice notation parser and roller
-  srd.py                SRD API client, fuzzy search, disk cache
+  srd.py                SRD API client, fuzzy search, disk cache, random-by-CR
   formatting.py         SRD JSON -> paginated Telegram HTML
   keyboards.py          inline keyboard builders, SRD callback tokens
   common.py             name/time helpers, campaign resolution, HTML escaping
+  help.py               the /help and /tutorial pages
+  sheet.py              sheet rules and rendering (HP bar, party, stat block)
+  services.py           shared flows and their words (campaigns, sessions)
   handlers/
     core.py             /start, /help, menus
     tutorial.py         /tutorial walkthrough
@@ -187,9 +270,23 @@ dndbot/
     campaign.py         campaigns, join approvals, sessions
     character.py        character creation and sheets
     srd_lookup.py       SRD commands, search and browser
+  mcp/
+    __init__.py         build_server(): assembles the 34-tool registry
+    runtime.py          lifespan: database and SRD cache, no Telethon
+    identity.py         who a tool acts for (user_id, else MCP_USER_ID)
+    inputs.py           campaign / member / DM resolution from arguments
+    render.py           Telegram HTML -> Markdown, strip, esc_md
+    dice.py             roll, party_initiative
+    srd.py              lookup, search, random, list
+    meta.py             whoami, get_help, get_tutorial, recent_errors
+    character.py        the 10 sheet tools
+    campaign.py         the 14 campaign and session tools
+docs/
+  mcp-server-plan.md    MCP plan, tool inventory and phase status
 tests/
   test_units.py         dice parser, paging, escaping (no network)
   test_flow.py          end-to-end handler flow with fake events
+  test_mcp.py           MCP registry and tools, no transport
 ```
 
 ## Tests
@@ -197,6 +294,7 @@ tests/
 ```bash
 .venv/bin/python tests/test_units.py   # fast, no network
 .venv/bin/python tests/test_flow.py    # full flow; hits the SRD API
+.venv/bin/python tests/test_mcp.py     # MCP tools; hits the SRD API
 ```
 
 `test_flow.py` drives the real handlers with fake Telegram events and asserts:
@@ -209,6 +307,14 @@ tests/
 
 The fake `CallbackQuery` deliberately has no `.out` attribute, matching real
 Telethon, so code that probes `event.out` in a button handler is caught.
+
+`test_mcp.py` builds the real registry (`build_server()`) and then calls every
+tool as a plain function — no transport, a throwaway database, environment set
+before `dndbot` is imported. It asserts the 34-tool inventory and its
+descriptions, then walks identity, dice, help, the SRD path, characters,
+campaigns and sessions, checking both contracts on the way: domain failures
+arrive as `ToolError` in plain text, and results are Markdown with no Telegram
+HTML left in them.
 
 ## Errors and logs
 

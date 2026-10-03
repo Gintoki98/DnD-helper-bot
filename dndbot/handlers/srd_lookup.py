@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 from typing import Any
 
 from telethon import events
@@ -11,7 +10,7 @@ from .. import keyboards as kb
 from ..common import MESSAGE_LIMIT, command_argument, send_view
 from ..formatting import format_entry, format_search_hit
 from ..keyboards import entry_from_token
-from ..srd import CATEGORIES, SRDError, srd
+from ..srd import BROWSE_PAGE, CATEGORIES, SRDError, srd
 
 
 async def send_entry(
@@ -56,17 +55,7 @@ async def send_search(event, term: str) -> None:
         )
         return
 
-    hits: list[tuple[str, Any]] = []
-    for key in ("spells", "monsters", "magicitems", "equipment", "rules",
-                "classes", "races", "conditions"):
-        try:
-            results = await srd.search(key, term, limit=4)
-        except SRDError:
-            continue
-        for entry in results:
-            if len(hits) >= 12:
-                break
-            hits.append((key, entry))
+    hits: list[tuple[str, Any]] = await srd.search_all(term, limit=12, per_category=4)
 
     if not hits:
         await event.reply(
@@ -84,9 +73,6 @@ async def send_search(event, term: str) -> None:
         buttons=kb.search_results_keyboard([(c, e.index, e.name) for c, e in hits]),
         parse_mode="html",
     )
-
-
-BROWSE_PAGE = 8
 
 
 def register(client) -> None:
@@ -157,10 +143,12 @@ def register(client) -> None:
                 await _random_cr(event, low_cr, high_cr)
                 return
             try:
-                float(cr)
+                value = float(cr)
             except ValueError:
                 await event.reply("Give a number like <code>/randmonster 2</code>", parse_mode="html")
                 return
+            await _random_cr(event, value, value)
+            return
         await send_entry(event, "monsters", "", random_pick=True)
 
     @client.on(events.NewMessage(pattern=r"^/randspell(?:@[\w_]+)?(?:\s+(\d))?$"))
@@ -274,21 +262,9 @@ async def _safe_index(category: str) -> list:
 
 async def _random_cr(event, low: float, high: float) -> None:
     """Pick a monster whose challenge rating sits in the given range."""
-    entries = await srd.index("monsters")
-    pool = []
-    for entry in entries:
-        cr = entry.extra.get("challenge_rating")
-        try:
-            value = float(cr)
-        except (TypeError, ValueError):
-            continue
-        if low <= value <= high:
-            pool.append(entry)
-    if not pool:
-        await event.reply(
-            f"No monsters with CR {low:g}-{high:g} in the SRD. Try a wider range.",
-            parse_mode="html",
-        )
+    try:
+        pick, _data = await srd.random_by_cr(low, high)
+    except SRDError as exc:
+        await event.reply(str(exc), parse_mode="html")
         return
-    pick = random.choice(pool)
     await send_entry(event, "monsters", pick.name)

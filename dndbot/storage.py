@@ -252,6 +252,19 @@ class Database:
     async def get_user(self, user_id: int) -> Any:
         return await self._fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
 
+    async def find_user(self, term: str) -> list[Any]:
+        """Telegram users whose username or name contains ``term``, newest first.
+
+        A leading ``@`` is ignored, because that is how a handle is usually
+        written. Only people who have already spoken to the bot are known.
+        """
+        like = f"%{term.strip().lstrip('@')}%"
+        return await self._fetchall(
+            "SELECT * FROM users WHERE username LIKE ? OR first_name LIKE ? "
+            "OR last_name LIKE ? ORDER BY last_seen DESC LIMIT 10",
+            (like, like, like),
+        )
+
     async def set_active_campaign(self, user_id: int, campaign_id: int | None) -> None:
         """Remember which campaign a player is currently working in."""
         await self._write(

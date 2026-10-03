@@ -6,7 +6,7 @@ from telethon import events
 
 from .. import keyboards as kb
 from ..common import command_argument, display_name, resolve_campaign, safe
-from ..dice import DiceError, RollResult, roll
+from ..dice import DiceError, RollResult, initiative_order, roll
 from ..storage import db
 from .srd_lookup import send_entry
 
@@ -98,11 +98,7 @@ def register(client) -> None:
             await event.reply("Nobody in this campaign has a character yet.", parse_mode="html")
             return
 
-        scores = []
-        for member in party:
-            result = roll(f"d20+{bonus + member['initiative']}")
-            scores.append((result.total, member))
-        scores.sort(key=lambda pair: pair[0], reverse=True)
+        scores = initiative_order(party, bonus)
 
         lines = [f"<b>\U0001f3af Initiative for {safe(campaign['name'])}</b>", ""]
         for total, member in scores:

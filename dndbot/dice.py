@@ -17,6 +17,7 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass, field
+from typing import Any, Iterable
 
 MAX_DICE_PER_TERM = 100
 MAX_TOTAL_DICE = 200
@@ -266,5 +267,19 @@ def roll(expression: str) -> RollResult:
     for term in result.terms:
         _roll_term(term)
     return result
+
+
+def initiative_order(party: Iterable[Any], bonus: int = 0) -> list[tuple[int, Any]]:
+    """Roll initiative for a party: ``(total, member)`` pairs, highest first.
+
+    A d20 plus the member's own initiative modifier plus ``bonus``, sorted
+    descending. Ties keep the order the party came in.
+    """
+    scores = [
+        (roll(f"d20+{bonus + member['initiative']}").total, member)
+        for member in party
+    ]
+    scores.sort(key=lambda pair: pair[0], reverse=True)
+    return scores
 
 

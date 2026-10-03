@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 import aiohttp
 
@@ -72,6 +72,15 @@ CATEGORY_ALIASES: dict[str, str] = {
     "damagetype": "damagetypes", "alignment": "alignments",
 }
 
+# What /search fans out to, most-searched categories first.
+SEARCH_CATEGORIES: tuple[str, ...] = (
+    "spells", "monsters", "magicitems", "equipment",
+    "rules", "classes", "races", "conditions",
+)
+
+# Entries shown per page in the browser: the bot's pager and srd_list agree.
+BROWSE_PAGE = 8
+
 
 class SRDError(RuntimeError):
     """Raised when the SRD API cannot be reached or returns nonsense."""
@@ -120,6 +129,7 @@ class SRDClient:
         self._session: aiohttp.ClientSession | None = None
         self._indexes: dict[str, tuple[float, list[Entry]]] = {}
         self._details: dict[str, tuple[float, dict]] = {}
+        self._ratings: tuple[float, dict[str, float]] | None = None
         self._lock = asyncio.Lock()
         self._ready: set[str] = set()
 
@@ -137,26 +147,50 @@ class SRDClient:
         self._session = None
 
     # -- http -----------------------------------------------------------
-    async def _get(self, url: str) -> Any:
-        if self._session is None:
-            await self.start()
-        assert self._session is not None
-
+    async def _retry(self, once: Callable[[], Awaitable[Any]]) -> Any:
+        """Run ``once`` - one HTTP attempt - under the client's retry policy."""
         last: Exception | None = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with self._session.get(url) as response:
-                    if response.status == 404:
-                        raise SRDError(f"The SRD API has no entry at {url}")
-                    if response.status == 429 or response.status >= 500:
-                        raise SRDError(f"SRD API is unhappy ({response.status})")
-                    response.raise_for_status()
-                    return await response.json(content_type=None)
+                return await once()
             except (aiohttp.ClientError, asyncio.TimeoutError, SRDError) as exc:
                 last = exc
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(1.5 * attempt)
         raise SRDError(f"Could not reach the SRD API: {last}")
+
+    async def _get(self, url: str) -> Any:
+        if self._session is None:
+            await self.start()
+        assert self._session is not None
+
+        async def once() -> Any:
+            async with self._session.get(url) as response:
+                if response.status == 404:
+                    raise SRDError(f"The SRD API has no entry at {url}")
+                if response.status == 429 or response.status >= 500:
+                    raise SRDError(f"SRD API is unhappy ({response.status})")
+                response.raise_for_status()
+                return await response.json(content_type=None)
+
+        return await self._retry(once)
+
+    async def _post_json(self, url: str, payload: Any) -> Any:
+        """POST a JSON body and decode the reply, under the same retry policy."""
+        if self._session is None:
+            await self.start()
+        assert self._session is not None
+
+        async def once() -> Any:
+            async with self._session.post(url, json=payload) as response:
+                if response.status == 404:
+                    raise SRDError(f"The SRD API has no endpoint at {url}")
+                if response.status == 429 or response.status >= 500:
+                    raise SRDError(f"SRD API is unhappy ({response.status})")
+                response.raise_for_status()
+                return await response.json(content_type=None)
+
+        return await self._retry(once)
 
     def _api(self, path: str) -> str:
         return f"{self.base}/api/{self.version}/{path.lstrip('/')}"
@@ -351,6 +385,72 @@ class SRDClient:
             raise SRDError("Nothing to pick from in that category")
         pick = pool[random.randrange(len(pool))]
         return pick, await self.detail(pick)
+
+    async def challenge_ratings(self) -> dict[str, float]:
+        """``index -> challenge rating`` for the whole bestiary, cached like an index.
+
+        The REST listing hides ``challenge_rating`` - only spell levels ride on
+        the index - but the same API's GraphQL endpoint hands back every
+        monster's rating in one small response, so this costs one round-trip
+        instead of a detail fetch per monster.
+        """
+        if self._ratings and time.time() - self._ratings[0] < INDEX_TTL:
+            return self._ratings[1]
+
+        payload = await self._post_json(
+            f"{self.base}/graphql",
+            {"query": "{ monsters(limit: 1000) { index challenge_rating } }"},
+        )
+        if payload.get("errors"):
+            raise SRDError(f"The SRD GraphQL API said: {payload['errors']}")
+        rows = (payload.get("data") or {}).get("monsters") or []
+
+        ratings: dict[str, float] = {}
+        for row in rows:
+            try:
+                ratings[row["index"]] = float(row["challenge_rating"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not ratings:
+            raise SRDError("The SRD GraphQL API returned no monsters")
+        self._ratings = (time.time(), ratings)
+        return ratings
+
+    async def random_by_cr(self, low: float, high: float) -> tuple[Entry, dict]:
+        """A monster whose challenge rating sits in ``[low, high]``, inclusive."""
+        entries = await self.index("monsters")
+        ratings = await self.challenge_ratings()
+        pool = [
+            entry
+            for entry in entries
+            if entry.index in ratings and low <= ratings[entry.index] <= high
+        ]
+        if not pool:
+            span = f"{low:g}-{high:g}" if low != high else f"{low:g}"
+            raise SRDError(f"No monsters with CR {span} in the SRD. Try a wider range.")
+        pick = pool[random.randrange(len(pool))]
+        return pick, await self.detail(pick)
+
+    async def search_all(
+        self, term: str, limit: int = 12, per_category: int = 4
+    ) -> list[tuple[str, Entry]]:
+        """The best hits across every category players actually search.
+
+        Categories are tried in :data:`SEARCH_CATEGORIES` order, a failing
+        one is skipped, and ``limit`` caps the total so a broad word cannot
+        flood the list.
+        """
+        hits: list[tuple[str, Entry]] = []
+        for key in SEARCH_CATEGORIES:
+            try:
+                results = await self.search(key, term, limit=per_category)
+            except SRDError:
+                continue
+            for entry in results:
+                if len(hits) >= limit:
+                    return hits
+                hits.append((key, entry))
+        return hits
 
 
 srd = SRDClient()

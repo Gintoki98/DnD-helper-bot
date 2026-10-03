@@ -176,14 +176,17 @@ class NotTheDM(Exception):
     """Raised when a player-only command is used by a non-DM."""
 
 
-async def resolve_campaign(event, argument: str | None = None) -> Any:
-    """Work out which campaign a command refers to.
+async def resolve_campaign_for(
+    user_id: int, argument: str | None = None, chat_title: str | None = None
+) -> Any:
+    """Work out which campaign a user's command refers to.
 
-    Order: explicit argument -> the campaign being used in this chat -> the
+    Free of Telegram: ``chat_title`` is the title of the group the message
+    came from - None in a private chat, and always None for the MCP server.
+
+    Order: explicit argument -> the campaign named in the chat title -> the
     user's last selected campaign -> their only campaign.
     """
-    user_id = event.sender_id
-
     if argument:
         term = argument.strip()
         row = await db.lookup_campaign(term)
@@ -193,10 +196,8 @@ async def resolve_campaign(event, argument: str | None = None) -> Any:
         return row
 
     # In a named group, prefer a campaign whose name appears in the title.
-    chat = getattr(event, "chat", None)
-    title = getattr(chat, "title", None) if chat is not None else None
-    if title:
-        lowered = title.lower()
+    if chat_title:
+        lowered = chat_title.lower()
         for row in await db.campaigns_for_user(user_id):
             if row["name"].lower() in lowered:
                 return row
@@ -221,6 +222,19 @@ async def resolve_campaign(event, argument: str | None = None) -> Any:
         "Which campaign? Send it explicitly, e.g. <code>/campaign Amber Court</code>.\n\n"
         f"{names}\n\nOr switch with <code>/select</code>."
     )
+
+
+async def resolve_campaign(event, argument: str | None = None) -> Any:
+    """resolve_campaign_for() for a Telegram event.
+
+    The chat title is read only when the argument did not already settle it:
+    ``event.chat`` can cost an entity lookup on Telegram's side.
+    """
+    title = None
+    if not argument:
+        chat = getattr(event, "chat", None)
+        title = getattr(chat, "title", None) if chat is not None else None
+    return await resolve_campaign_for(event.sender_id, argument, title)
 
 
 async def ensure_member(campaign, user_id: int) -> Any:

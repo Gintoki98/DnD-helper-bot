@@ -55,14 +55,17 @@ def register(client) -> None:
             "<code>/help srd</code>",
             buttons=[
                 [
-                    ("Dice", "menu:help:dice"),
-                    ("Campaigns", "menu:help:campaign"),
+                    ("\U0001f3b2 Dice", "menu:help:dice"),
+                    ("\U0001f3dd Campaigns", "menu:help:campaign"),
                 ],
                 [
-                    ("Sessions", "menu:help:session"),
-                    ("Characters", "menu:help:character"),
+                    ("\U0001f5d3\ufe0f Sessions", "menu:help:session"),
+                    ("\U0001f9d9 Characters", "menu:help:character"),
                 ],
-                [("SRD", "menu:help:srd"), ("Encounters", "menu:help:encounter")],
+                [
+                    ("\U0001f5c2\ufe0f SRD", "menu:help:srd"),
+                    ("\u2694\ufe0f Encounters", "menu:help:encounter"),
+                ],
                 [Button.inline("\U0001f4d6 Tutorial", "tut:0")],
             ],
             parse_mode="html",
